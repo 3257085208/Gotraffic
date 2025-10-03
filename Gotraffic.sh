@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ========================================
-#   DLTraffic 简单版 (单文件)
+#   DLTraffic 简单版 (Hetzner 专用源)
 #   功能: 下行带宽消耗 (循环)
 #   用法: bash dltraffic.sh <GiB> <间隔分钟> <线程数>
 #   示例: bash dltraffic.sh 7 10 4
@@ -12,17 +12,14 @@ LIMIT_GB=${1:-5}             # 每轮消耗多少 GiB
 INTERVAL_MINUTES=${2:-30}    # 每轮间隔分钟
 THREADS=${3:-2}              # 并发线程数
 
-# 下载源列表 (有效)
+# 下载源列表 (Hetzner 各节点)
 URLS=(
-  "https://speed.hetzner.de/1GB.bin"
-  "https://speed.hetzner.de/10GB.bin"
   "https://nbg1-speed.hetzner.com/1GB.bin"
-  "https://nbg1-speed.hetzner.com/10GB.bin"
-  "http://speedtest.tele2.net/1GB.zip"
-  "http://speedtest.tele2.net/10GB.zip"
-  "https://proof.ovh.net/files/1Gb.dat"
-  "https://proof.ovh.net/files/10Gb.dat"
-  "http://cachefly.cachefly.net/100mb.test"
+  "https://fsn1-speed.hetzner.com/1GB.bin"
+  "https://hel1-speed.hetzner.com/1GB.bin"
+  "https://ash-speed.hetzner.com/1GB.bin"
+  "https://hil-speed.hetzner.com/1GB.bin"
+  "https://sin-speed.hetzner.com/1GB.bin"
 )
 
 bytes_to_human(){
