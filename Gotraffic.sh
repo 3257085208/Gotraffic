@@ -20,7 +20,7 @@ GOTR_LINK="/usr/local/bin/gotr"
 LIMIT_GB=5
 INTERVAL_MINUTES=30
 THREADS=2
-AREA="A"     # A=国外(Cloudflare)，B=国内(QQ/学习强国)
+AREA="A"     # A=国外(Cloudflare)，B=国内(腾讯云/阿里云CDN)
 CHUNK_MB=50  # 每次请求的分块大小(MB)
 URLS=()
 
@@ -71,8 +71,7 @@ cmd_config(){
   read -rp "间隔时间 (分钟): " INTERVAL_MINUTES
   read -rp "线程数量 (1-32): " THREADS
   ((THREADS<1)) && THREADS=1; ((THREADS>32)) && THREADS=32
-  echo "下载源: A) 国外(Cloudflare CDN) 
-                B) 国内(腾讯云/阿里云CDN)"
+  echo "下载源: A： 国外(Cloudflare CDN) B： 国内(腾讯云/阿里云CDN)"
   read -rp "请选择 (A/B): " AREA; [[ -z "${AREA:-}" ]] && AREA="A"
   read -rp "分块大小(MB，默认50): " CHIN || true
   [[ -n "${CHIN:-}" ]] && CHUNK_MB="$CHIN"
