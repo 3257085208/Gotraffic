@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # GoTraffic 一体化安装/配置脚本
 # 作者: DaFuHao
-# 版本: v1.0.2 BETA
+# 版本: v1.0.5 BETA
 # 日期: 2025-10-03
 
 set -Eeuo pipefail
@@ -14,12 +14,13 @@ URLS_UL=/etc/gotraffic/urls.ul.txt
 CORE=/usr/local/bin/gotraffic-core.sh
 SVC=gotraffic.service
 TIMER=gotraffic.timer
+VERSION="v1.0.5"
 
 banner(){
   echo "========================================"
   echo "   GoTraffic 流量消耗工具"
   echo "   作者: DaFuHao"
-  echo "   版本: v1.0.2 BETA"
+  echo "   版本: $VERSION"
   echo "   日期: 2025年10月3日"
   echo "========================================"
 }
@@ -35,17 +36,20 @@ ask_config(){
 }
 
 write_core(){
-cat >"$CORE" <<EOF_CORE
+cat >"$CORE" <<'EOF_CORE'
 #!/usr/bin/env bash
 set -Eeuo pipefail
-: "\${LIMIT_GB:=$LIMIT_GB}"
-: "\${INTERVAL_MINUTES:=$INTERVAL_MINUTES}"
-: "\${THREADS:=$THREADS}"
-: "\${MODE:=download}"
-: "\${URLS_DL:=$URLS_DL}"
-: "\${URLS_UL:=$URLS_UL}"
-: "\${STATE_FILE:=$STATE_FILE}"
-: "\${LOG_FILE:=$LOG_FILE}"
+
+: "${LIMIT_GB:=10}"
+: "${THREADS:=2}"
+: "${MODE:=download}"
+: "${URLS_DL:=/etc/gotraffic/urls.dl.txt}"
+: "${URLS_UL:=/etc/gotraffic/urls.ul.txt}"
+: "${STATE_FILE:=/root/gotraffic.state}"
+: "${LOG_FILE:=/root/gotraffic.log}"
+
+mkdir -p "$(dirname "$STATE_FILE")" "$(dirname "$LOG_FILE")"
+touch "$STATE_FILE" "$LOG_FILE"
 
 log(){ echo "[\$(date '+%F %T')] \$*" | tee -a "\$LOG_FILE"; }
 bytes_gib(){ awk -v b="\$1" 'BEGIN{printf "%.2f GiB", b/1024/1024/1024}'; }
@@ -54,45 +58,43 @@ get_used(){ [ -f "\$STATE_FILE" ] && cat "\$STATE_FILE" || echo 0; }
 write_used(){ echo "\$1" > "\$STATE_FILE"; }
 
 pick_url(){ grep -v '^#' "\$1" | shuf -n1; }
-
 curl_dl(){ curl -L --silent --output /dev/null --write-out '%{size_download}\n' "\$1"; }
 curl_ul(){ head -c 25000000 /dev/zero | curl -X POST --data-binary @- -s -o /dev/null --write-out '%{size_upload}\n' "\$1"; }
 
 main(){
-  local limit=\$((LIMIT_GB*1024*1024*1024))
-  local used=\$(get_used)
-  local left=\$((limit-used))
+  local limit=$((LIMIT_GB*1024*1024*1024))
+  local used=$(get_used)
+  local left=$((limit-used))
   (( left <= 0 )) && { log "额度已满"; exit 0; }
 
-  local chunk=25000000   # 固定 25MB
   local got_total=0
-
   for ((i=1;i<=THREADS;i++)); do
     {
-      if [ "\$MODE" = "download" ]; then
-        url=\$(pick_url "\$URLS_DL"); got=\$(curl_dl "\$url")
-      elif [ "\$MODE" = "upload" ]; then
-        url=\$(pick_url "\$URLS_UL"); got=\$(curl_ul "\$url")
+      local got=0
+      if [ "$MODE" = "download" ]; then
+        url=$(pick_url "$URLS_DL"); got=$(curl_dl "$url")
+      elif [ "$MODE" = "upload" ]; then
+        url=$(pick_url "$URLS_UL"); got=$(curl_ul "$url")
       else
-        url=\$(pick_url "\$URLS_DL"); got1=\$(curl_dl "\$url")
-        url=\$(pick_url "\$URLS_UL"); got2=\$(curl_ul "\$url")
-        got=\$((got1+got2))
+        url=$(pick_url "$URLS_DL"); g1=$(curl_dl "$url")
+        url=$(pick_url "$URLS_UL"); g2=$(curl_ul "$url")
+        got=$((g1+g2))
       fi
-      echo "\$got" >> "\$STATE_FILE.tmp"
+      echo "$got" >> "$STATE_FILE.tmp"
     } &
   done
   wait
 
-  if [ -f "\$STATE_FILE.tmp" ]; then
-    while read -r line; do got_total=\$((got_total+line)); done < "\$STATE_FILE.tmp"
-    rm -f "\$STATE_FILE.tmp"
+  if [ -f "$STATE_FILE.tmp" ]; then
+    while read -r line; do got_total=$((got_total+line)); done < "$STATE_FILE.tmp"
+    rm -f "$STATE_FILE.tmp"
   fi
 
-  used=\$((used+got_total))
-  write_used "\$used"
-  log "本轮消耗 \$(bytes_gib "\$got_total") | 累计 \$(bytes_gib "\$used")/\$(bytes_gib "\$limit")"
+  used=$((used+got_total))
+  write_used "$used"
+  log "本轮消耗 $(bytes_gib "$got_total") | 累计 $(bytes_gib "$used")/$(bytes_gib "$limit")"
 }
-main "\$@"
+main "$@"
 EOF_CORE
 chmod +x "$CORE"
 }
@@ -101,22 +103,28 @@ write_systemd(){
 cat >/etc/systemd/system/$SVC <<EOF
 [Unit]
 Description=GoTraffic core
+
 [Service]
 Type=oneshot
-Environment=LIMIT_GB=$LIMIT_GB
-Environment=INTERVAL_MINUTES=$INTERVAL_MINUTES
-Environment=THREADS=$THREADS
-Environment=MODE=download
+Environment="LIMIT_GB=$LIMIT_GB"
+Environment="THREADS=$THREADS"
+Environment="MODE=download"
+Environment="URLS_DL=$URLS_DL"
+Environment="URLS_UL=$URLS_UL"
+Environment="STATE_FILE=$STATE_FILE"
+Environment="LOG_FILE=$LOG_FILE"
 ExecStart=$CORE
 EOF
 
 cat >/etc/systemd/system/$TIMER <<EOF
 [Unit]
 Description=Run GoTraffic
+
 [Timer]
 OnBootSec=1m
 OnUnitActiveSec=${INTERVAL_MINUTES}m
 Persistent=true
+
 [Install]
 WantedBy=timers.target
 EOF
@@ -126,77 +134,92 @@ systemctl enable --now $TIMER
 }
 
 write_gotr(){
-cat >/usr/local/bin/gotr <<EOF_GOTR
+cat >/usr/local/bin/gotr <<'EOF_GOTR'
 #!/usr/bin/env bash
 set -e
-svc=$SVC
-timer=$TIMER
-core=$CORE
-logfile="$LOG_FILE"
-case "\$1" in
+svc=gotraffic.service
+timer=gotraffic.timer
+core=/usr/local/bin/gotraffic-core.sh
+logfile="/root/gotraffic.log"
+state="/root/gotraffic.state"
+current_version="v1.0.5"
+
+case "$1" in
   d) systemctl set-environment MODE=download; echo "切换到下行模式";;
   u) systemctl set-environment MODE=upload; echo "切换到上行模式";;
   ud) systemctl set-environment MODE=ud; echo "切换到上下行模式";;
-  now) systemctl start \$svc;;
+  now) systemctl start $svc;;
   status)
     echo "--- 流量状态 ---"
-    used=\$(cat "$STATE_FILE" 2>/dev/null || echo 0)
-    limit=\$((\$(systemctl cat \$svc | grep 'Environment=LIMIT_GB' | cut -d= -f2)*1024*1024*1024))
-    echo "已用: \$((used/1024/1024/1024)) GiB / \$((limit/1024/1024/1024)) GiB"
+    used=$(cat "$state" 2>/dev/null || echo 0)
+    limit=$(( $(systemctl show -p Environment $svc | grep LIMIT_GB | cut -d= -f2)*1024*1024*1024 ))
+    echo "已用: $((used/1024/1024/1024)) GiB / $((limit/1024/1024/1024)) GiB"
     echo "--- 定时器状态 ---"
     systemctl list-timers | grep gotraffic || true
     ;;
-  log) tail -f "\$logfile";;
-  stop)
-    systemctl disable --now \$timer
-    echo "GoTraffic 定时器已停止"
-    ;;
-  resume)
-    systemctl enable --now \$timer
-    echo "GoTraffic 定时器已恢复"
-    ;;
+  log) tail -f "$logfile";;
+  stop) systemctl disable --now $timer; echo "GoTraffic 定时器已停止";;
+  resume) systemctl enable --now $timer; echo "GoTraffic 定时器已恢复";;
   config)
     echo "=== 修改 GoTraffic 配置 ==="
-    old_limit=\$(systemctl cat \$svc | grep 'Environment=LIMIT_GB' | cut -d= -f2)
-    old_interval=\$(systemctl cat \$svc | grep 'Environment=INTERVAL_MINUTES' | cut -d= -f2)
-    old_threads=\$(systemctl cat \$svc | grep 'Environment=THREADS' | cut -d= -f2)
-    read -rp "新额度 (GiB, 当前=\$old_limit): " new_limit
-    read -rp "新间隔 (分钟, 当前=\$old_interval): " new_interval
-    read -rp "新线程数 (1-32, 当前=\$old_threads): " new_threads
-    new_limit=\${new_limit:-\$old_limit}
-    new_interval=\${new_interval:-\$old_interval}
-    new_threads=\${new_threads:-\$old_threads}
-    if (( new_threads < 1 || new_threads > 32 )); then
-      echo "⚠️ 线程数必须在 1-32 之间，保持原值 \$old_threads"
-      new_threads=\$old_threads
-    fi
-    sed -i "s|Environment=LIMIT_GB=.*|Environment=LIMIT_GB=\$new_limit|" /etc/systemd/system/\$svc
-    sed -i "s|Environment=INTERVAL_MINUTES=.*|Environment=INTERVAL_MINUTES=\$new_interval|" /etc/systemd/system/\$svc
-    sed -i "s|Environment=THREADS=.*|Environment=THREADS=\$new_threads|" /etc/systemd/system/\$svc
+    old_limit=$(systemctl show -p Environment $svc | grep LIMIT_GB | cut -d= -f2)
+    old_interval=$(systemctl show -p OnUnitActiveSec $timer | cut -d= -f2 | sed 's/m//')
+    old_threads=$(systemctl show -p Environment $svc | grep THREADS | cut -d= -f2)
+    read -rp "新额度 (GiB, 当前=$old_limit): " new_limit
+    read -rp "新间隔 (分钟, 当前=$old_interval): " new_interval
+    read -rp "新线程数 (1-32, 当前=$old_threads): " new_threads
+    new_limit=${new_limit:-$old_limit}
+    new_interval=${new_interval:-$old_interval}
+    new_threads=${new_threads:-$old_threads}
+    sed -i "s|Environment=\"LIMIT_GB=.*|Environment=\"LIMIT_GB=$new_limit\"|" /etc/systemd/system/$svc
+    sed -i "s|Environment=\"THREADS=.*|Environment=\"THREADS=$new_threads\"|" /etc/systemd/system/$svc
+    sed -i "s|OnUnitActiveSec=.*|OnUnitActiveSec=${new_interval}m|" /etc/systemd/system/$timer
     systemctl daemon-reload
-    systemctl restart \$timer
-    echo "配置已更新 ✅ (额度=\$new_limit GiB, 间隔=\$new_interval 分钟, 线程=\$new_threads)"
+    systemctl restart $timer
+    echo "配置已更新 ✅ (额度=$new_limit GiB, 间隔=$new_interval 分钟, 线程=$new_threads)"
+    ;;
+  update)
+    echo "=== GoTraffic 自动更新 ==="
+    tmp=$(mktemp)
+    wget -qO "$tmp" https://raw.githubusercontent.com/3257085208/Gotraffic/main/Gotraffic.sh
+    if [ -s "$tmp" ]; then
+      remote_version=$(grep '版本:' "$tmp" | head -n1 | awk '{print $2}')
+      echo "当前版本: $current_version"
+      echo "远程版本: $remote_version"
+      if [ "$remote_version" = "$current_version" ]; then
+        echo "ℹ️ 已是最新版，无需更新"
+        rm -f "$tmp"
+      else
+        mv "$tmp" /usr/local/bin/Gotraffic.sh
+        chmod +x /usr/local/bin/Gotraffic.sh
+        echo "✅ 已下载最新版，请运行: bash /usr/local/bin/Gotraffic.sh 重新安装"
+      fi
+    else
+      echo "❌ 更新失败，无法获取最新版"
+      rm -f "$tmp"
+    fi
     ;;
   uninstall)
-    systemctl disable --now \$timer || true
-    systemctl disable --now \$svc || true
+    systemctl disable --now $timer || true
+    systemctl disable --now $svc || true
     rm -f /etc/systemd/system/gotraffic.{service,timer}
     rm -f /usr/local/bin/gotraffic-core.sh /usr/local/bin/gotr
-    rm -f "$LOG_FILE" "$STATE_FILE"
+    rm -f "$logfile" "$state"
     systemctl daemon-reload
     echo "GoTraffic 已卸载"
     ;;
   *)
-    echo "=== GoTraffic 快捷命令用法 ==="
+    echo "=== GoTraffic 快捷命令用法 (当前版本: $current_version) ==="
     echo "  gotr d        切换到下行模式"
     echo "  gotr u        切换到上行模式"
     echo "  gotr ud       切换到上下行模式"
     echo "  gotr now      立即执行一次"
-    echo "  gotr status   查看当前流量状态 & 定时器情况"
+    echo "  gotr status   查看流量状态 & 定时器情况"
     echo "  gotr log      实时查看日志 (tail -f)"
     echo "  gotr stop     停止后台定时器"
     echo "  gotr resume   恢复后台定时器"
-    echo "  gotr config   修改已设置的额度/间隔/线程数"
+    echo "  gotr config   修改额度/间隔/线程数"
+    echo "  gotr update   获取最新版安装脚本"
     echo "  gotr uninstall 卸载 GoTraffic"
     ;;
 esac
@@ -209,12 +232,12 @@ main(){
   ask_config
   write_core
   [ -e "$URLS_DL" ] || echo "https://speed.cloudflare.com/__down?bytes=25000000" > "$URLS_DL"
-  [ -e "$URLS_UL" ] || echo "# 上传 URL 填这里 (建议配置一个可接受 POST 的服务)" > "$URLS_UL"
+  [ -e "$URLS_UL" ] || echo "# 上传 URL 填这里 (建议配置可接受 POST 的服务)" > "$URLS_UL"
   write_systemd
   write_gotr
   echo "安装完成 ✅"
   echo "日志文件: $LOG_FILE"
-  echo "快捷命令: gotr d|u|ud|now|status|log|stop|resume|config|uninstall"
+  echo "快捷命令: gotr d|u|ud|now|status|log|stop|resume|config|update|uninstall"
 }
 
 main
