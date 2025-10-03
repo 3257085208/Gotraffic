@@ -2,13 +2,13 @@
 # ========================================
 #   GoTraffic 流量消耗工具
 #   作者: DaFuHao
-#   版本: v1.1.1
+#   版本: v1.2.0
 #   日期: 2025年10月3日
 # ========================================
 
 set -Eeuo pipefail
 
-VERSION="v1.1.1"
+VERSION="v1.2.0"
 AUTHOR="DaFuHao"
 DATE="2025年10月3日"
 
@@ -47,6 +47,7 @@ set -Eeuo pipefail
 : "${LOG_FILE:=/root/gotraffic.log}"
 : "${URLS_DL:=/etc/gotraffic/urls.dl.txt}"
 : "${URLS_UL:=/etc/gotraffic/urls.ul.txt}"
+: "${BATCH_SLEEP_MS:=200}"  # 每一批之间的休眠，毫秒，保证“秒级”持续运行同时不爆CPU
 : "${DEBUG:=0}"
 
 mkdir -p "$(dirname "$STATE_FILE")" "$(dirname "$LOG_FILE")"
@@ -65,6 +66,17 @@ bytes_h(){ awk -v b="$1" 'BEGIN{split("B KB MB GB TB",u);i=1;while(b>=1024&&i<5)
 # -------- 窗口状态 (state: 第一行=窗口起始时间戳, 第二行=本窗已用字节) --------
 read_state(){ [ -f "$STATE_FILE" ] && awk 'NR==1{print $1+0} NR==2{print $1+0}' "$STATE_FILE"; }
 write_state(){ printf '%s\n%s\n' "$1" "$2" > "$STATE_FILE"; }
+
+window_secs_left(){
+  local start now secs
+  secs=$((INTERVAL_MINUTES*60))
+  start=$(awk 'NR==1{print $1+0}' "$STATE_FILE" 2>/dev/null || echo 0)
+  now=$(date +%s)
+  local left=$((secs-(now-start)))
+  [ "$left" -lt 0 ] && left=0
+  echo "$left"
+}
+
 ensure_window(){
   local now_ts secs start used
   now_ts=$(date +%s); secs=$((INTERVAL_MINUTES*60))
@@ -85,16 +97,9 @@ pick_url(){ awk 'NF && $1 !~ /^#/' "$1" | { command -v shuf >/dev/null 2>&1 && s
 curl_dl(){ curl -L --silent --fail --output /dev/null --write-out '%{size_download}\n' "$1"; }
 curl_ul(){ head -c 25000000 /dev/zero | curl -L --silent --fail -X POST --data-binary @- --output /dev/null --write-out '%{size_upload}\n' "$1"; }
 
-run_once(){
-  ensure_window
-  local limit used left
-  limit=$((LIMIT_GB*1024*1024*1024))
-  used=$(get_used)
-  left=$((limit-used))
-  if [ "$left" -le 0 ]; then log "本窗口额度已完成"; return 0; fi
-
+run_batch_once(){
+  # 跑一批（THREADS 个并发），返回本批实际字节
   local tmp; tmp="$(mktemp)"
-  log "开始：额度=$(bytes_h "$limit") 已用=$(bytes_h "$used") 线程=$THREADS 模式=$MODE"
   local i
   for ((i=1;i<=THREADS;i++)); do
     {
@@ -108,11 +113,44 @@ run_once(){
     } &
   done
   wait
-  local got_total line; got_total=0
-  while read -r line; do [ -n "$line" ] && got_total=$((got_total+line)); done < "$tmp"
+  local sum=0 line
+  while read -r line; do [ -n "$line" ] && sum=$((sum+line)); done < "$tmp"
   rm -f "$tmp"
-  add_used "$got_total"; used=$(get_used)
-  log "完成：新增 $(bytes_h "$got_total") | 累计 $(bytes_h "$used") / $(bytes_h "$limit")"
+  echo "$sum"
+}
+
+run_until_cap(){
+  ensure_window
+  local limit used left
+  limit=$((LIMIT_GB*1024*1024*1024))
+  used=$(get_used)
+  left=$((limit-used))
+  if [ "$left" -le 0 ]; then log "本窗口额度已完成"; return 0; fi
+
+  log "开始循环：窗口额度=$(bytes_h "$limit") 已用=$(bytes_h "$used") 线程=$THREADS 模式=$MODE 窗口剩余$(window_secs_left)s"
+  while :; do
+    # 窗口或额度检查
+    local win_left=$(window_secs_left)
+    used=$(get_used)
+    left=$((limit-used))
+    if [ "$left" -le 0 ]; then log "达到窗口上限，停止。"; break; fi
+    if [ "$win_left" -le 0 ]; then log "窗口已结束，停止。"; break; fi
+
+    # 执行一批
+    local got; got="$(run_batch_once)"
+    got="${got%%.*}"
+    add_used "$got"
+    used=$(get_used)
+    log "本批新增 $(bytes_h "$got") | 累计 $(bytes_h "$used") / $(bytes_h "$limit") | 窗口剩余 ${win_left}s"
+
+    # 秒级持续：很短暂睡眠（毫秒）
+    if [ "$BATCH_SLEEP_MS" -gt 0 ] 2>/dev/null; then
+      python3 - <<PY 2>/dev/null || sleep 0
+import time; time.sleep(${BATCH_SLEEP_MS}/1000)
+PY
+    fi
+  done
+  log "本轮结束。"
 }
 
 status_cli(){
@@ -126,19 +164,20 @@ status_cli(){
   [ -z "$lg" ] && lg="$LIMIT_GB"; [ -z "$th" ] && th="$THREADS"; [ -z "$md" ] && md="$MODE"
   ensure_window
   local used limit; used=$(get_used); limit=$((lg*1024*1024*1024))
-  echo "--- 流量状态 ---"; echo "已用: $(bytes_h "$used") / $(bytes_h "$limit")   (线程=$th 模式=$md)"
+  echo "--- 流量状态 ---"; echo "已用: $(bytes_h "$used") / $(bytes_h "$limit")   (线程=$th 模式=$md) | 窗口剩余 $(window_secs_left)s"
   echo "--- 定时器状态 ---"; systemctl list-timers gotraffic.timer --no-pager --all 2>/dev/null || true
 }
 
 edit_service_env(){ sed -i "s|Environment=\"$1=.*|Environment=\"$1=$2\"|" /etc/systemd/system/gotraffic.service; }
 
 case "${1:-}" in
-  run)        run_once ;;
+  run)        run_until_cap ;;
   status)     status_cli ;;
   d)          edit_service_env MODE download; systemctl daemon-reload; echo "模式=download";;
   u)          edit_service_env MODE upload;   systemctl daemon-reload; echo "模式=upload";;
   ud)         edit_service_env MODE ud;       systemctl daemon-reload; echo "模式=ud";;
   now|new)    systemctl start gotraffic.service ;;   # 兼容 gotr new
+  abort)      systemctl kill gotraffic.service || true; echo "已尝试中止当前任务";;
   log)        tail -f "$LOG_FILE" ;;
   stop)       systemctl stop gotraffic.timer; echo "定时器已停止";;
   resume)     systemctl start gotraffic.timer; echo "定时器已恢复";;
@@ -173,7 +212,7 @@ EOT
   update)     tmp=$(mktemp); if command -v curl >/dev/null 2>&1; then curl -fsSL -o "$tmp" https://raw.githubusercontent.com/3257085208/Gotraffic/main/Gotraffic.sh; else wget -qO "$tmp" https://raw.githubusercontent.com/3257085208/Gotraffic/main/Gotraffic.sh; fi; if [ -s "$tmp" ]; then mv "$tmp" /usr/local/bin/Gotraffic.sh; chmod +x /usr/local/bin/Gotraffic.sh; echo "✅ 已下载到 /usr/local/bin/Gotraffic.sh"; else echo "❌ 更新失败"; rm -f "$tmp"; fi ;;
   uninstall)  systemctl disable --now gotraffic.timer 2>/dev/null || true; systemctl disable --now gotraffic.service 2>/dev/null || true; rm -f /etc/systemd/system/gotraffic.{service,timer}; rm -f /usr/local/bin/gotraffic-core.sh /usr/local/bin/gotr; rm -f "$LOG_FILE" "$STATE_FILE"; systemctl daemon-reload; echo "已卸载 ✅";;
   version)    echo "GoTraffic core $(date '+%F %T')";;
-  *)          echo "用法: gotr {d|u|ud|now|status|log|stop|resume|config|update|uninstall|version}";;
+  *)          echo "用法: gotr {d|u|ud|now|new|abort|status|log|stop|resume|config|update|uninstall|version}";;
 esac
 EOF_CORE
   chmod +x /usr/local/bin/gotraffic-core.sh
@@ -216,7 +255,7 @@ Environment="URLS_UL=$URLS_UL"
 ExecStart=/usr/local/bin/gotraffic-core.sh run
 EOF
 
-  # 使用 OnCalendar，真·每 INTERVAL_MINUTES 分钟必跑一次
+  # 使用 OnCalendar，真·每 INTERVAL_MINUTES 分钟触发一次
   cat >/etc/systemd/system/gotraffic.timer <<EOF
 [Unit]
 Description=Run GoTraffic every ${INTERVAL_MINUTES} minutes
@@ -233,7 +272,7 @@ EOF
 
   systemctl daemon-reload
   systemctl enable --now gotraffic.timer
-  # 首次安装后立即跑一轮，避免等待
+  # 安装后立即跑一轮（马上开始秒级循环）
   systemctl start gotraffic.service || true
 }
 
@@ -252,7 +291,7 @@ main_install(){
 
   echo "[$(date '+%F %T')] 安装完成 ✅" | tee -a "$LOG_FILE"
   echo "日志文件: $LOG_FILE"
-  echo "快捷命令: gotr d|u|ud|now|status|log|stop|resume|config|update|uninstall"
+  echo "快捷命令: gotr d|u|ud|now|new|abort|status|log|stop|resume|config|update|uninstall"
 }
 
 # ----------------- 入口 -----------------
