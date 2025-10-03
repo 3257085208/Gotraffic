@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# GoTraffic - 下行带宽消耗工具（本地目录版）
+# GoTraffic - 下行带宽消耗工具
 # 版本: v1.2.6
 # 用法: bash Gotraffic.sh {run|run-foreground|start|stop|status|log|version|uninstall|config|set|show|install-systemd|remove-systemd|install-gotr|remove-gotr|help}
 
 set -Eeuo pipefail
 
-VERSION="v1.2.5"
+VERSION="v1.2.6"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 STATE_FILE="$SCRIPT_DIR/gotraffic.state"
@@ -71,7 +71,8 @@ cmd_config(){
   read -rp "间隔时间 (分钟): " INTERVAL_MINUTES
   read -rp "线程数量 (1-32): " THREADS
   ((THREADS<1)) && THREADS=1; ((THREADS>32)) && THREADS=32
-  echo "下载源: A) 国外(Cloudflare)  B) 国内(QQ/学习强国)"
+  echo "下载源: A) 国外(Cloudflare CDN) 
+                B) 国内(腾讯云/阿里云CDN)"
   read -rp "请选择 (A/B): " AREA; [[ -z "${AREA:-}" ]] && AREA="A"
   read -rp "分块大小(MB，默认50): " CHIN || true
   [[ -n "${CHIN:-}" ]] && CHUNK_MB="$CHIN"
