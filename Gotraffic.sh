@@ -2,25 +2,24 @@
 # ========================================
 #   GoTraffic 流量消耗工具
 #   作者: DaFuHao
-#   版本: v1.0.6
+#   版本: v1.0.7
 #   日期: 2025年10月3日
 # ========================================
 
 set -Eeuo pipefail
 
-VERSION="v1.0.6"
+VERSION="v1.0.7"
 AUTHOR="DaFuHao"
 DATE="2025年10月3日"
 
 # ---------------- 默认配置 ----------------
-: "${LIMIT_GB:=10}"              # 每窗口消耗 GiB
-: "${INTERVAL_MINUTES:=30}"      # 窗口时长 (分钟)
-: "${THREADS:=2}"                # 并发线程数
-: "${MODE:=download}"            # download | upload | ud
+: "${LIMIT_GB:=10}"
+: "${INTERVAL_MINUTES:=30}"
+: "${THREADS:=2}"
+: "${MODE:=download}"
 : "${STATE_FILE:=/root/gotraffic.state}"
 : "${LOG_FILE:=/root/gotraffic.log}"
 
-# 内置默认 URL（无需额外配置）
 : "${URLS_DL:=/etc/gotraffic/urls.dl.txt}"
 : "${URLS_UL:=/etc/gotraffic/urls.ul.txt}"
 DEFAULT_DL_URL="https://speed.cloudflare.com/__down?bytes=25000000"
@@ -30,23 +29,18 @@ mkdir -p /etc/gotraffic
 [ -f "$URLS_DL" ] || echo "$DEFAULT_DL_URL" > "$URLS_DL"
 [ -f "$URLS_UL" ] || echo "$DEFAULT_UL_URL" > "$URLS_UL"
 
-# ---------------- 日志函数 ----------------
+# ---------------- 工具函数 ----------------
 log(){ echo "[$(date '+%F %T')] $*" | tee -a "$LOG_FILE"; }
+bytes_h(){ awk -v b="$1" 'BEGIN{split("B KB MB GB TB",u);i=1;while(b>=1024&&i<5){b/=1024;i++}printf "%.2f %s",b,u[i] }'; }
 
 # ---------------- 状态管理 ----------------
 read_state(){
   if [ -f "$STATE_FILE" ]; then
-    awk '
-      NR==1 { print $1+0 }
-      NR==2 { print $1+0 }
-    ' "$STATE_FILE"
+    awk 'NR==1{print $1+0} NR==2{print $1+0}' "$STATE_FILE"
   fi
 }
 
-write_state(){
-  local start="$1" used="$2"
-  printf '%s\n%s\n' "$start" "$used" > "$STATE_FILE"
-}
+write_state(){ printf '%s\n%s\n' "$1" "$2" > "$STATE_FILE"; }
 
 ensure_window(){
   local now_ts=$(date +%s) start=0 used=0 secs=$((INTERVAL_MINUTES*60))
@@ -64,8 +58,6 @@ add_used(){ local add="$1"; mapfile -t s < <(read_state); local start="${s[0]:-$
 
 # ---------------- 流量任务 ----------------
 pick_url(){ awk 'NF && $1 !~ /^#/' "$1" | head -n1; }
-bytes_h(){ awk -v b="$1" 'BEGIN{split("B KB MB GB TB",u);i=1;while(b>=1024&&i<5){b/=1024;i++}printf "%.2f %s",b,u[i] }'; }
-
 curl_dl(){ local url="$1"; curl -L --silent --fail --output /dev/null --write-out '%{size_download}\n' "$url"; }
 curl_ul(){ local url="$1" size=25000000; head -c "$size" /dev/zero | curl -L --silent --fail -X POST --data-binary @- --output /dev/null --write-out '%{size_upload}\n' "$url"; }
 
@@ -99,7 +91,7 @@ status(){
   systemctl list-timers gotraffic.timer --no-pager --all || true
 }
 
-# ---------------- 安装 systemd ----------------
+# ---------------- systemd ----------------
 install_systemd(){
 cat >/etc/systemd/system/gotraffic.service <<EOF
 [Unit]
@@ -114,7 +106,7 @@ Environment="URLS_DL=$URLS_DL"
 Environment="URLS_UL=$URLS_UL"
 Environment="STATE_FILE=$STATE_FILE"
 Environment="LOG_FILE=$LOG_FILE"
-ExecStart=/usr/local/bin/gotraffic-core.sh
+ExecStart=/usr/local/bin/gotraffic-core.sh core
 EOF
 
 cat >/etc/systemd/system/gotraffic.timer <<EOF
@@ -134,7 +126,7 @@ systemctl daemon-reload
 systemctl enable --now gotraffic.timer
 }
 
-# ---------------- 快捷命令 ----------------
+# ---------------- 快捷命令分发器 ----------------
 gotr(){
 case "$1" in
   d) sudo systemctl set-environment MODE=download && log "切换到下载模式" ;;
@@ -193,9 +185,9 @@ else
 
   cp "$0" /usr/local/bin/gotraffic-core.sh
   chmod +x /usr/local/bin/gotraffic-core.sh
-  cat >/usr/local/bin/gotr <<EOF
+  cat >/usr/local/bin/gotr <<'EOF'
 #!/usr/bin/env bash
-/usr/local/bin/gotraffic-core.sh "\$@"
+/usr/local/bin/gotraffic-core.sh "$@"
 EOF
   chmod +x /usr/local/bin/gotr
 
