@@ -2,14 +2,14 @@
 # ========================================
 #   GoTraffic 流量消耗工具
 #   作者: DaFuHao
-#   版本: v1.3.0
+#   版本: v1.3.2
 #   日期: 2025-10-03
 # ========================================
 
 set -Eeuo pipefail
-VERSION="v1.3.0"; AUTHOR="DaFuHao"; DATE="2025-10-03"
+VERSION="v1.3.2"; AUTHOR="DaFuHao"; DATE="2025-10-03"
 
-# 安装阶段默认值（运行期以 systemd Environment 为准）
+# 安装阶段默认值（运行期以 systemd Environment 为准；可用 gotr config 修改）
 : "${LIMIT_GB:=10}"                 # 每窗口额度 GiB
 : "${INTERVAL_MINUTES:=30}"         # 窗口时长(分钟)
 : "${THREADS:=2}"                   # 并发 1-32
@@ -19,14 +19,14 @@ VERSION="v1.3.0"; AUTHOR="DaFuHao"; DATE="2025-10-03"
 : "${URLS_DL:=/etc/gotraffic/urls.dl.txt}"
 : "${URLS_UL:=/etc/gotraffic/urls.ul.txt}"
 
-# 强化参数（可在 /etc/systemd/system/gotraffic.service 的 Environment 里覆盖）
+# 强化参数（可在 gotr config 里改，也可直接改 service 的 Environment）
 : "${CHUNK_BYTES_DL:=100000000}"    # 单次下载字节（默认 100,000,000 B ≈ 95 MiB）
 : "${CHUNK_BYTES_UL:=25000000}"     # 单次上传字节
 : "${BATCH_SLEEP_MS:=150}"          # 批次间隔毫秒
-: "${ZERO_BACKOFF_MS:=1500}"        # 全 0 批次的初始退避
-: "${ZERO_BACKOFF_MAX_MS:=12000}"   # 全 0 批次的最大退避
+: "${ZERO_BACKOFF_MS:=1500}"        # 全 0 批次初始退避
+: "${ZERO_BACKOFF_MAX_MS:=12000}"   # 全 0 批次最大退避
 
-DEFAULT_DL_URL="https://speed.cloudflare.com/__down?bytes={bytes}"
+DEFAULT_DL_URLS=$'# 你也可以继续追加更多源（每行一个）\nhttps://speed.cloudflare.com/__down?bytes=104857600\nhttps://speed.cloudflare.com/__down?bytes=524288000\nhttps://speed.cloudflare.com/__down?bytes=25000000\nhttps://speed.cloudflare.com/__down?bytes=1073741824\nhttps://p1.dailygn.com/obj/g-marketing-act-assets/2024_11_28_14_54_37/mv_1128_1080px.mp4\n'
 DEFAULT_UL_URL="https://speed.cloudflare.com/__down?bytes={bytes}"
 
 banner(){ cat <<EOF
@@ -93,10 +93,10 @@ ensure_window(){
 add_used(){ local add="$1"; mapfile -t s < <(read_state || true); local start="${s[0]:-$(date +%s)}" used="${s[1]:-0}"; write_state "$start" "$((used+add))"; }
 
 # --- URL 处理 ---
-pick_url(){ awk 'NF && $1 !~ /^#/' "$1" | { command -v shuf >/dev/null 2>&1 && shuf -n1 || head -n1; }; }
+pick_url(){ awk 'NF && $1 !~ /^#/' "$1" | { command -v shuf >/div/null 2>&1 && shuf -n1 || head -n1; }; } 2>/dev/null || head -n1 "$1"
 bust(){ # 追加随机参数避免限频缓存
   local u="$1" r; r=$RANDOM$RANDOM$RANDOM
-  if [[ "$u" == *\{bytes\}* ]]; then
+  if [[ "$u" == *\{bytes\}* && -n "${2:-}" ]]; then
     u="${u//\{bytes\}/$2}"
   fi
   if [[ "$u" == *\?* ]]; then
@@ -105,7 +105,26 @@ bust(){ # 追加随机参数避免限频缓存
     echo "${u}?r=${r}"
   fi
 }
-curl_dl(){ curl --http1.1 -L --silent --show-error --fail --output /dev/null --write-out '%{size_download}\n' "$1"; }
+
+dl_with_bytes(){
+  local u="$1"
+  curl --http1.1 -L --silent --show-error --fail --output /dev/null --write-out '%{size_download}\n' "$u"
+}
+dl_with_range(){
+  local u="$1" bytes="$2"
+  local end=$((bytes-1))
+  curl --http1.1 -L --silent --show-error --fail --range "0-${end}" --output /dev/null --write-out '%{size_download}\n' "$u"
+}
+
+curl_dl_choose(){
+  local raw="$1" bytes="$2"
+  if [[ "$raw" == *\{bytes\}* || "$raw" == *"bytes="* ]]; then
+    dl_with_bytes "$(bust "$raw" "$bytes")"
+  else
+    dl_with_range "$(bust "$raw" "$bytes")" "$bytes"
+  fi
+}
+
 curl_ul(){ head -c "$2" /dev/zero | curl --http1.1 -L --silent --show-error --fail -X POST --data-binary @- --output /dev/null --write-out '%{size_upload}\n' "$1"; }
 
 sleep_ms(){ awk -v ms="$1" 'BEGIN{printf "%.3f", ms/1000}' | { read s; sleep "$s"; } 2>/dev/null || true; }
@@ -118,16 +137,16 @@ run_batch_once(){
       local got=0 u g1 g2
       case "$MODE" in
         download)
-          u="$(pick_url "$URLS_DL")"; u="$(bust "$u" "$CHUNK_BYTES_DL")"
-          got="$(curl_dl "$u" || echo 0)"
+          u="$(pick_url "$URLS_DL")"
+          got="$(curl_dl_choose "$u" "$CHUNK_BYTES_DL" || echo 0)"
         ;;
         upload)
           u="$(pick_url "$URLS_UL")"; u="$(bust "$u" "$CHUNK_BYTES_UL")"
           got="$(curl_ul "$u" "$CHUNK_BYTES_UL" || echo 0)"
         ;;
         ud)
-          u="$(pick_url "$URLS_DL")"; u="$(bust "$u" "$CHUNK_BYTES_DL")"
-          g1="$(curl_dl "$u" || echo 0)"
+          u="$(pick_url "$URLS_DL")"
+          g1="$(curl_dl_choose "$u" "$CHUNK_BYTES_DL" || echo 0)"
           u="$(pick_url "$URLS_UL")"; u="$(bust "$u" "$CHUNK_BYTES_UL")"
           g2="$(curl_ul "$u" "$CHUNK_BYTES_UL" || echo 0)"
           got=$((g1+g2))
@@ -161,8 +180,7 @@ run_until_cap(){
     if [ "$win_left" -le 0 ]; then log "窗口已结束，停止。"; break; fi
 
     local got; got="$(run_batch_once)"; got="${got%%.*}"
-    if [ "$got" -le 0 ]; then
-      # 全 0 批次：指数退避避免被继续限速
+    if [ "$got" -le 0 ] ; then
       log "本批新增 0 B（可能被限速/限频），退避 ${zero_sleep}ms 后再试"
       sleep_ms "$zero_sleep"
       zero_sleep=$(( zero_sleep*2 )); [ "$zero_sleep" -gt "$ZERO_BACKOFF_MAX_MS" ] && zero_sleep="$ZERO_BACKOFF_MAX_MS"
@@ -180,18 +198,22 @@ run_until_cap(){
 }
 
 status_cli(){
-  local svc env lg th md iv
+  local svc env lg th md iv cbd bsm
   svc=gotraffic.service
   env=$(systemctl show -p Environment "$svc" 2>/dev/null | sed -e 's/^Environment=//' -e 's/ /\n/g' || true)
   lg=$(echo "$env" | awk -F= '$1=="LIMIT_GB"{print $2}')
   th=$(echo "$env" | awk -F= '$1=="THREADS"{print $2}')
   md=$(echo "$env" | awk -F= '$1=="MODE"{print $2}')
   iv=$(echo "$env" | awk -F= '$1=="INTERVAL_MINUTES"{print $2}')
+  cbd=$(echo "$env" | awk -F= '$1=="CHUNK_BYTES_DL"{print $2}')
+  bsm=$(echo "$env" | awk -F= '$1=="BATCH_SLEEP_MS"{print $2}')
   [ -z "$lg" ] && lg="$LIMIT_GB"; [ -z "$th" ] && th="$THREADS"; [ -z "$md" ] && md="$MODE"; [ -z "$iv" ] && iv="$INTERVAL_MINUTES"
+  [ -z "$cbd" ] && cbd="$CHUNK_BYTES_DL"; [ -z "$bsm" ] && bsm="$BATCH_SLEEP_MS"
   INTERVAL_MINUTES="$iv"
   ensure_window
   local used limit; used=$(get_used); limit=$((lg*1024*1024*1024))
-  echo "--- 流量状态 ---"; echo "已用: $(bytes_h "$used") / $(bytes_h "$limit")   (线程=$th 模式=$md 窗口=${iv}m) | 窗口剩余 $(window_secs_left)s"
+  echo "--- 流量状态 ---"
+  echo "已用: $(bytes_h "$used") / $(bytes_h "$limit")   (线程=$th 模式=$md 窗口=${iv}m 块=$cbd B 批间隔=${bsm}ms) | 窗口剩余 $(window_secs_left)s"
   echo "--- 定时器状态 ---"; systemctl list-timers gotraffic.timer --no-pager --all 2>/dev/null || true
 }
 
@@ -212,23 +234,26 @@ case "${1:-}" in
               old_l=$(systemctl cat gotraffic.service | awk -F= '/Environment="LIMIT_GB=/{print $3}' | tr -d '"')
               old_t=$(systemctl cat gotraffic.service | awk -F= '/Environment="THREADS=/{print $3}' | tr -d '"')
               old_i=$(systemctl cat gotraffic.service | awk -F= '/Environment="INTERVAL_MINUTES=/{print $3}' | tr -d '"')
+              old_cbd=$(systemctl cat gotraffic.service | awk -F= '/Environment="CHUNK_BYTES_DL=/{print $3}' | tr -d '"')
+              old_bsm=$(systemctl cat gotraffic.service | awk -F= '/Environment="BATCH_SLEEP_MS=/{print $3}' | tr -d '"')
               [ -z "$old_i" ] && old_i=$(systemctl cat gotraffic.timer | awk -F= '/^OnCalendar=/{print $2}' | sed -n 's#.*:0/\([0-9]\+\):00.*#\1#p')
 
-              read -rp "新额度 GiB (当前=$old_l): " new_l; new_l=${new_l:-$old_l}
-              read -rp "新线程 1-32 (当前=$old_t): " new_t; new_t=${new_t:-$old_t}
-              read -rp "新间隔 分钟 (当前=$old_i): " new_i; new_i=${new_i:-$old_i}
+              read -rp "新额度 GiB (当前=$old_l): " new_l;   new_l=${new_l:-$old_l}
+              read -rp "新线程 1-32 (当前=$old_t): " new_t;   new_t=${new_t:-$old_t}
+              read -rp "新间隔 分钟 (当前=$old_i): " new_i;   new_i=${new_i:-$old_i}
+              read -rp "新 CHUNK_BYTES_DL 字节 (当前=${old_cbd:-$CHUNK_BYTES_DL}): " new_cbd; new_cbd=${new_cbd:-${old_cbd:-$CHUNK_BYTES_DL}}
+              read -rp "新 BATCH_SLEEP_MS 毫秒 (当前=${old_bsm:-$BATCH_SLEEP_MS}): " new_bsm; new_bsm=${new_bsm:-${old_bsm:-$BATCH_SLEEP_MS}}
 
               edit_service_env LIMIT_GB "$new_l"
               edit_service_env THREADS  "$new_t"
               edit_service_env INTERVAL_MINUTES "$new_i"
-              # 同步强化参数（可按需暴露更多）
-              edit_service_env CHUNK_BYTES_DL "$CHUNK_BYTES_DL"
+              edit_service_env CHUNK_BYTES_DL "$new_cbd"
+              edit_service_env BATCH_SLEEP_MS "$new_bsm"
               edit_service_env CHUNK_BYTES_UL "$CHUNK_BYTES_UL"
-              edit_service_env BATCH_SLEEP_MS "$BATCH_SLEEP_MS"
               edit_service_env ZERO_BACKOFF_MS "$ZERO_BACKOFF_MS"
               edit_service_env ZERO_BACKOFF_MAX_MS "$ZERO_BACKOFF_MAX_MS"
 
-              # 重写 timer：每 new_i 分钟第 0 秒触发
+              # 重写 timer：每 new_i 分钟触发
               cat >/etc/systemd/system/gotraffic.timer <<EOT
 [Unit]
 Description=Run GoTraffic every ${new_i} minutes
@@ -245,7 +270,7 @@ EOT
               systemctl restart gotraffic.timer
 
               rm -f "$STATE_FILE" 2>/dev/null || true
-              echo "配置已更新 ✅ (额度=${new_l}GiB 线程=${new_t} 间隔=${new_i} 分钟)"
+              echo "配置已更新 ✅ (额度=${new_l}GiB 线程=${new_t} 间隔=${new_i} 分钟 块=${new_cbd}B 批间隔=${new_bsm}ms)"
               ;;
   update)     tmp=$(mktemp); if command -v curl >/dev/null 2>&1; then curl -fsSL -o "$tmp" https://raw.githubusercontent.com/3257085208/Gotraffic/main/Gotraffic.sh; else wget -qO "$tmp" https://raw.githubusercontent.com/3257085208/Gotraffic/main/Gotraffic.sh; fi; if [ -s "$tmp" ]; then mv "$tmp" /usr/local/bin/Gotraffic.sh; chmod +x /usr/local/bin/Gotraffic.sh; echo "✅ 已下载到 /usr/local/bin/Gotraffic.sh"; else echo "❌ 更新失败"; rm -f "$tmp"; fi ;;
   uninstall)  systemctl disable --now gotraffic.timer 2>/dev/null || true; systemctl disable --now gotraffic.service 2>/dev/null || true; rm -f /etc/systemd/system/gotraffic.{service,timer}; rm -f /usr/local/bin/gotraffic-core.sh /usr/local/bin/gotr; rm -f "$LOG_FILE" "$STATE_FILE"; systemctl daemon-reload; echo "已卸载 ✅";;
@@ -268,8 +293,11 @@ EOF_GOTR
 # ----------------- 写 systemd 单元 -----------------
 write_systemd(){
   mkdir -p /etc/gotraffic
-  [ -s "$URLS_DL" ] || echo "https://speed.cloudflare.com/__down?bytes={bytes}" > "$URLS_DL"
-  [ -s "$URLS_UL" ] || echo "https://speed.cloudflare.com/__down?bytes={bytes}" > "$URLS_UL"
+  # 如果 dl 清单为空，写入你的多源（每行一个）
+  if [ ! -s "$URLS_DL" ]; then
+    printf "%b" "$DEFAULT_DL_URLS" > "$URLS_DL"
+  fi
+  [ -s "$URLS_UL" ] || echo "$DEFAULT_UL_URL" > "$URLS_UL"
 
   cat >/etc/systemd/system/gotraffic.service <<EOF
 [Unit]
