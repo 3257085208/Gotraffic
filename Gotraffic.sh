@@ -1,20 +1,9 @@
 #!/usr/bin/env bash
 # ========================================
-#   GoTraffic 一键安装器 (systemd + gotr)
+#   GoTraffic systemd 管理版 (修复版)
+#   支持交互配置 + systemd 后台 + gotr 管理
 # ========================================
 
-set -Eeuo pipefail
-
-INSTALL_DIR="/usr/local/gotraffic"
-BIN_LINK="/usr/local/bin/gotr"
-SERVICE="/etc/systemd/system/gotraffic.service"
-TIMER="/etc/systemd/system/gotraffic.timer"
-
-mkdir -p "$INSTALL_DIR"
-
-# ============ 主脚本 ==============
-cat > "$INSTALL_DIR/Gotraffic.sh" <<"EOF"
-#!/usr/bin/env bash
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -49,6 +38,7 @@ inc_bytes(){
   flock -u 200
 }
 
+# ----------------- 问答配置 -----------------
 ask_params(){
   read -rp "请输入要消耗的流量 (GiB): " LIMIT_GB
   read -rp "请输入间隔时间 (分钟): " INTERVAL_MINUTES
@@ -70,6 +60,7 @@ ask_params(){
     )
   fi
 
+  # 保存配置
   cat > "$SCRIPT_DIR/gotraffic.conf" <<EOC
 LIMIT_GB=$LIMIT_GB
 INTERVAL_MINUTES=$INTERVAL_MINUTES
@@ -78,9 +69,15 @@ AREA=$AREA
 EOC
 }
 
+# ----------------- 读取配置 -----------------
 load_params(){
-  [[ -f "$SCRIPT_DIR/gotraffic.conf" ]] && source "$SCRIPT_DIR/gotraffic.conf"
-  if [[ "$AREA" =~ ^[Aa]$ ]]; then
+  if [[ -f "$SCRIPT_DIR/gotraffic.conf" ]]; then
+    source "$SCRIPT_DIR/gotraffic.conf"
+  else
+    ask_params
+  fi
+
+  if [[ "${AREA:-A}" =~ ^[Aa]$ ]]; then
     URLS=("https://speed.cloudflare.com/__down?during=download&bytes=1073741824")
   else
     URLS=(
@@ -90,6 +87,7 @@ load_params(){
   fi
 }
 
+# ----------------- 主下载逻辑 -----------------
 consume_window(){
   local target_bytes=$(( LIMIT_GB * 1024 * 1024 * 1024 ))
   echo 0 > "$STATE_FILE"
@@ -121,8 +119,9 @@ consume_window(){
   log "[`date '+%F %T'`] 本轮完成"
 }
 
+# ----------------- 主循环 -----------------
 main_loop(){
-  load_params || ask_params
+  load_params
   while :; do
     consume_window
     log "[`date '+%F %T'`] 休息 ${INTERVAL_MINUTES} 分钟..."
@@ -130,6 +129,7 @@ main_loop(){
   done
 }
 
+# ----------------- 入口 -----------------
 case "$1" in
   run) main_loop ;;
   uninstall)
@@ -144,47 +144,3 @@ case "$1" in
     ;;
   *) main_loop ;;
 esac
-EOF
-
-chmod +x "$INSTALL_DIR/Gotraffic.sh"
-
-# ============ systemd 单元文件 ==============
-cat > "$SERVICE" <<"EOF"
-[Unit]
-Description=GoTraffic Bandwidth Consumer
-After=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/gotraffic/Gotraffic.sh run
-Restart=always
-EOF
-
-cat > "$TIMER" <<"EOF"
-[Unit]
-Description=GoTraffic Auto Start
-
-[Timer]
-OnBootSec=1min
-Unit=gotraffic.service
-
-[Install]
-WantedBy=timers.target
-EOF
-
-# ============ 快捷命令 ==============
-cat > "$BIN_LINK" <<"EOF"
-#!/usr/bin/env bash
-exec /usr/local/gotraffic/Gotraffic.sh "$@"
-EOF
-
-chmod +x "$BIN_LINK"
-
-# ============ 启动服务 ==============
-systemctl daemon-reload
-systemctl enable gotraffic.timer
-systemctl start gotraffic.timer
-
-echo "✅ GoTraffic 已安装完成"
-echo "命令: gotr run|status|log|uninstall"
-echo "日志: /usr/local/gotraffic/gotraffic.log"
