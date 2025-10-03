@@ -2,13 +2,13 @@
 # ========================================
 #   GoTraffic 流量消耗工具
 #   作者: DaFuHao
-#   版本: v1.2.1
+#   版本: v1.2.2
 #   日期: 2025年10月3日
 # ========================================
 
 set -Eeuo pipefail
 
-VERSION="v1.2.1"
+VERSION="v1.2.2"
 AUTHOR="DaFuHao"
 DATE="2025年10月3日"
 
@@ -99,7 +99,6 @@ curl_ul(){ head -c 25000000 /dev/zero | curl -L --silent --fail -X POST --data-b
 
 # -------- 毫秒休眠（支持无 python 的环境） --------
 sleep_ms(){
-  # 优先用 coreutils 的浮点 sleep
   local ms="$1"
   if command -v sleep >/dev/null 2>&1; then
     awk -v ms="$ms" 'BEGIN{printf "%.3f", ms/1000}' | { read s; sleep "$s"; } 2>/dev/null || true
@@ -187,20 +186,20 @@ case "${1:-}" in
   config)
               old_l=$(systemctl cat gotraffic.service | awk -F= '/Environment="LIMIT_GB=/{print $3}' | tr -d '"')
               old_t=$(systemctl cat gotraffic.service | awk -F= '/Environment="THREADS=/{print $3}' | tr -d '"')
-              # 读 OnCalendar=*-*-* *:*/IV:00 → 取 IV
-              old_i=$(systemctl cat gotraffic.timer | awk -F= '/^OnCalendar=/{print $2}' | awk -F'*/' 'NF>1{print $2}' | sed 's/:00.*//;s/[^0-9]//g')
+              # 读 OnCalendar=*-*-* *:0/IV:00 → 取 IV
+              old_i=$(systemctl cat gotraffic.timer | awk -F= '/^OnCalendar=/{print $2}' | sed -n 's#.*:0/\([0-9]\+\):00.*#\1#p')
               [ -z "$old_i" ] && old_i=$(systemctl cat gotraffic.timer | awk -F= '/OnUnitActiveSec=/{print $2}' | sed 's/[^0-9]//g')
               read -rp "新额度 GiB (当前=$old_l): " new_l; new_l=${new_l:-$old_l}
               read -rp "新线程 1-32 (当前=$old_t): " new_t; new_t=${new_t:-$old_t}
               read -rp "新间隔 分钟 (当前=$old_i): " new_i; new_i=${new_i:-$old_i}
               edit_service_env LIMIT_GB "$new_l"
               edit_service_env THREADS  "$new_t"
-              # 重写 timer 为 OnCalendar（每 new_i 分钟触发一次）
+              # 重写 timer 为 OnCalendar（每 new_i 分钟触发一次，分钟=0/步进）
               cat >/etc/systemd/system/gotraffic.timer <<EOT
 [Unit]
 Description=Run GoTraffic every ${new_i} minutes
 [Timer]
-OnCalendar=*-*-* *:*/${new_i}:00
+OnCalendar=*-*-* *:0/${new_i}:00
 Unit=gotraffic.service
 Persistent=true
 AccuracySec=1s
@@ -259,13 +258,13 @@ Environment="URLS_UL=$URLS_UL"
 ExecStart=/usr/local/bin/gotraffic-core.sh run
 EOF
 
-  # 使用 OnCalendar：每 INTERVAL_MINUTES 分钟的第 0 秒触发
+  # 使用 OnCalendar：每 INTERVAL_MINUTES 分钟的第 0 秒触发（合法写法）
   cat >/etc/systemd/system/gotraffic.timer <<EOF
 [Unit]
 Description=Run GoTraffic every ${INTERVAL_MINUTES} minutes
 
 [Timer]
-OnCalendar=*-*-* *:*/${INTERVAL_MINUTES}:00
+OnCalendar=*-*-* *:0/${INTERVAL_MINUTES}:00
 Unit=gotraffic.service
 Persistent=true
 AccuracySec=1s
