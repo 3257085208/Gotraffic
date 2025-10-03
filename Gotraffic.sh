@@ -2,13 +2,13 @@
 # ========================================
 #   GoTraffic 流量消耗工具
 #   作者: DaFuHao
-#   版本: v1.2.4
+#   版本: v1.2.5
 #   日期: 2025-10-03
 # ========================================
 
 set -Eeuo pipefail
 
-VERSION="v1.2.4"
+VERSION="v1.2.5"
 AUTHOR="DaFuHao"
 DATE="2025-10-03"
 
@@ -119,7 +119,7 @@ run_batch_once(){
       echo "${got%%.*}" >> "$tmp"
     } &
   done
-  wait || true   # 关键：单个失败不影响整轮
+  wait || true   # 关键修复：单个失败不影响整轮
   local sum=0 line
   while read -r line; do [ -n "$line" ] && sum=$((sum+line)); done < "$tmp"
   rm -f "$tmp"
@@ -163,6 +163,7 @@ status_cli(){
   md=$(echo "$env" | awk -F= '$1=="MODE"{print $2}')
   iv=$(echo "$env" | awk -F= '$1=="INTERVAL_MINUTES"{print $2}')
   [ -z "$lg" ] && lg="$LIMIT_GB"; [ -z "$th" ] && th="$THREADS"; [ -z "$md" ] && md="$MODE"; [ -z "$iv" ] && iv="$INTERVAL_MINUTES"
+  INTERVAL_MINUTES="$iv"  # ★ 用 systemd 的值修正显示
   ensure_window
   local used limit; used=$(get_used); limit=$((lg*1024*1024*1024))
   echo "--- 流量状态 ---"; echo "已用: $(bytes_h "$used") / $(bytes_h "$limit")   (线程=$th 模式=$md 窗口=${iv}m) | 窗口剩余 $(window_secs_left)s"
