@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# GoTraffic - 下行带宽消耗工具
-# 版本: v1.2.3
-# 用法: bash Gotraffic.sh {run|run-foreground|start|stop|status|log|version|uninstall|config|set|show|install-systemd|remove-systemd|help}
+# GoTraffic - 下行带宽消耗工具（本地目录版）
+# 版本: v1.2.5
+# 用法: bash Gotraffic.sh {run|run-foreground|start|stop|status|log|version|uninstall|config|set|show|install-systemd|remove-systemd|install-gotr|remove-gotr|help}
 
 set -Eeuo pipefail
 
-VERSION="v1.2.3"
+VERSION="v1.2.5"
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 STATE_FILE="$SCRIPT_DIR/gotraffic.state"
@@ -14,6 +14,7 @@ LOG_FILE="$SCRIPT_DIR/gotraffic.log"
 CONF_FILE="$SCRIPT_DIR/gotraffic.conf"
 SERVICE="/etc/systemd/system/gotraffic.service"
 TIMER="/etc/systemd/system/gotraffic.timer"
+GOTR_LINK="/usr/local/bin/gotr"
 
 # 默认参数（可通过 config/set 修改）
 LIMIT_GB=5
@@ -70,8 +71,7 @@ cmd_config(){
   read -rp "间隔时间 (分钟): " INTERVAL_MINUTES
   read -rp "线程数量 (1-32): " THREADS
   ((THREADS<1)) && THREADS=1; ((THREADS>32)) && THREADS=32
-  echo "下载源: A) 国外(Cloudflare)
-                B) 国内(腾讯云/阿里云CDN)"
+  echo "下载源: A) 国外(Cloudflare)  B) 国内(QQ/学习强国)"
   read -rp "请选择 (A/B): " AREA; [[ -z "${AREA:-}" ]] && AREA="A"
   read -rp "分块大小(MB，默认50): " CHIN || true
   [[ -n "${CHIN:-}" ]] && CHUNK_MB="$CHIN"
@@ -207,31 +207,91 @@ remove_systemd(){
   echo "[OK] systemd 已移除"
 }
 
+# —— gotr 快捷命令（方案 C）——
+install_gotr(){
+  ln -sf "$SCRIPT_PATH" "$GOTR_LINK"
+  chmod +x "$GOTR_LINK"
+  echo "[OK] 已创建系统级快捷命令: $GOTR_LINK"
+  echo "    现在可以直接使用: gotr run | gotr s | gotr v | gotr help"
+}
+
+remove_gotr(){
+  if [[ -L "$GOTR_LINK" ]]; then
+    local target="$(readlink -f "$GOTR_LINK" || true)"
+    if [[ "$target" == "$SCRIPT_PATH" ]]; then
+      rm -f "$GOTR_LINK"
+      echo "[OK] 已删除快捷命令: $GOTR_LINK"
+    else
+      echo "[跳过] $GOTR_LINK 指向其他文件（$target），未删除"
+    fi
+  else
+    rm -f "$GOTR_LINK" 2>/dev/null || true
+  fi
+}
+
 # —— 帮助 & 用法（两处共用，保证一致）——
 print_usage(){
   cat <<'USAGE'
-状态命令说明:
-  run                首次自动创建/更新 systemd，并保持后台运行
-  run-foreground     前台调试运行（打印详细进度）
-  start              启动 systemd 定时器/服务（后台）
-  stop               停止 systemd 定时器/服务
-  status             查看 systemd 状态（是否在后台运行）
-  log                跟踪查看脚本日志（Ctrl+C 退出）
-  version            显示版本号
-  uninstall          卸载脚本：移除 systemd 单元并删除本目录内日志/状态/配置/脚本
+状态命令说明（支持简写）:
+  run      | r      首次自动创建/更新 systemd，并在后台运行（退出SSH也继续）。
+  run-foreground
+            | rf    前台调试运行（打印详细进度）。
+  start    | s      启动 systemd 定时器/服务（后台）。
+  stop     | x      停止 systemd 定时器/服务。
+  status   | st     查看 systemd 状态（是否在后台运行）。
+  log      | l      跟踪查看脚本日志（Ctrl+C 退出）。
+  version  | v      显示版本号。
+  uninstall| u      卸载脚本：移除 systemd 单元并删除本目录内日志/状态/配置/脚本。
 
-  config             交互式配置（流量GiB、间隔分钟、线程1-32、国内外、分块MB）
-  set k=v [...]      非交互更新配置（示例见下）
-  show               显示当前配置
-  install-systemd    手动安装 systemd 单元（指向当前目录脚本）
-  remove-systemd     手动移除 systemd 单元
+  config   | c      交互式配置（流量GiB、间隔分钟、线程1-32、国内外、分块MB）。
+  set k=v [...]     非交互更新配置（示例见下）。
+  show     | sh     显示当前配置。
+  install-systemd
+            | is    手动安装 systemd 单元（指向当前目录脚本）。
+  remove-systemd
+            | rs    手动移除 systemd 单元。
+  install-gotr
+            | ig    安装系统级快捷命令 /usr/local/bin/gotr（需root）。
+  remove-gotr
+            | rg    移除系统级快捷命令 /usr/local/bin/gotr。
+
+示例:
+  gotr r
+  gotr s
+  gotr v
+  gotr set limit=10 interval=10 threads=8 area=A
+  gotr sh
 USAGE
 }
 
 cmd_help(){ print_usage; }
 
+# —— 将别名标准化为主命令 —— 
+normalize_cmd(){
+  case "${1:-}" in
+    r)  echo "run" ;;
+    rf) echo "run-foreground" ;;
+    s)  echo "start" ;;
+    x)  echo "stop" ;;
+    st) echo "status" ;;
+    l)  echo "log" ;;
+    v)  echo "version" ;;
+    u)  echo "uninstall" ;;
+    c)  echo "config" ;;
+    sh) echo "show" ;;
+    is) echo "install-systemd" ;;
+    rs) echo "remove-systemd" ;;
+    ig) echo "install-gotr" ;;
+    rg) echo "remove-gotr" ;;
+    help|-h|--help) echo "help" ;;
+    *) echo "${1:-}" ;;
+  esac
+}
+
+CMD="$(normalize_cmd "${1:-}")"
+
 # —— 入口 ——
-case "${1:-}" in
+case "${CMD:-}" in
   run-foreground)
     echo "GoTraffic $VERSION（前台调试）"
     main_loop
@@ -254,17 +314,23 @@ case "${1:-}" in
   show)       cmd_show ;;
   install-systemd) install_systemd ;;
   remove-systemd)  remove_systemd ;;
+  install-gotr)    install_gotr ;;
+  remove-gotr)     remove_gotr ;;
   start)      systemctl start gotraffic.timer gotraffic.service || true; echo "已启动" ;;
   stop)       systemctl stop  gotraffic.timer gotraffic.service || true; echo "已停止" ;;
   status)     systemctl --no-pager status gotraffic.timer gotraffic.service ;;
   uninstall)
     remove_systemd
+    remove_gotr
     rm -f "$SCRIPT_DIR/gotraffic."{log,state,lock,conf} 2>/dev/null || true
     rm -f "$SCRIPT_PATH" 2>/dev/null || true
     echo "已卸载 $VERSION"
     ;;
-  help|-h|--help)
+  help)
     cmd_help
+    ;;
+  "")
+    print_usage
     ;;
   *)
     print_usage
