@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # Gotraffic.sh — 单文件一键安装 + 核心逻辑 + systemd + 快捷命令
-
 set -Eeuo pipefail
 
 # =============== 交互设置 ===============
@@ -60,6 +59,9 @@ add_used(){ local add=$1; mapfile -t s < <(read_state); local start="${s[0]:-$(d
 pick_url(){ grep -v '^#' "$1" | shuf -n1; }
 rand_chunk(){ awk -v min="$CHUNK_MIN_MB" -v max="$CHUNK_MAX_MB" 'BEGIN{srand();print int((min+rand()*(max-min+1))*1024*1024)}'; }
 
+# 🔥 修复: URL 替换 {bytes}
+prepare_url(){ local url="$1" size="$2"; echo "${url//\{bytes\}/$size}"; }
+
 curl_dl(){ curl -L --silent --output /dev/null --write-out '%{size_download}\n' "$1"; }
 curl_ul(){ head -c "$2" /dev/zero | curl -X POST --data-binary @- -s -o /dev/null --write-out '%{size_upload}\n' "$1"; }
 
@@ -74,11 +76,11 @@ main(){
   (( chunk > left )) && chunk=$left
 
   if [ "$MODE" = "download" ]; then
-    url=$(pick_url "$URLS_DL"); got=$(curl_dl "$url")
+    url=$(pick_url "$URLS_DL"); url=$(prepare_url "$url" "$chunk"); got=$(curl_dl "$url")
   elif [ "$MODE" = "upload" ]; then
     url=$(pick_url "$URLS_UL"); got=$(curl_ul "$url" "$chunk")
   else
-    url=$(pick_url "$URLS_DL"); got1=$(curl_dl "$url")
+    url=$(pick_url "$URLS_DL"); url=$(prepare_url "$url" "$chunk"); got1=$(curl_dl "$url")
     url=$(pick_url "$URLS_UL"); got2=$(curl_ul "$url" "$chunk")
     got=$((got1+got2))
   fi
