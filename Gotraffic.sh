@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# GoTraffic - 下行带宽消耗工具
+# GoTraffic - 下行带宽消耗器
 # 版本: v1.2.6
 # 用法: bash Gotraffic.sh {run|run-foreground|start|stop|status|log|version|uninstall|config|set|show|install-systemd|remove-systemd|install-gotr|remove-gotr|help}
 
@@ -233,22 +233,22 @@ remove_gotr(){
 print_usage(){
   cat <<'USAGE'
 状态命令说明:
-  run                首次自动创建/更新 systemd，并在后台运行（退出SSH也继续）。
-  run-foreground     前台调试运行（打印详细进度）。
-  start              启动 systemd 定时器/服务（后台）。
-  stop               停止 systemd 定时器/服务。
-  status             查看 systemd 状态（是否在后台运行）。
-  log                跟踪查看脚本日志（Ctrl+C 退出）。
-  version            显示版本号。
-  uninstall          卸载脚本：移除 systemd 单元并删除本目录内日志/状态/配置/脚本。
+  run                首次自动创建/更新 systemd，并在后台运行
+  run-foreground     前台调试运行（打印详细进度）
+  start              启动 systemd 定时器/服务
+  stop               停止 systemd 定时器/服务
+  status             查看 systemd 状态（是否在后台运行）
+  log                跟踪查看脚本日志（Ctrl+C 退出）
+  version            显示版本号
+  uninstall          卸载脚本：移除 systemd 单元并删除本目录内日志/状态/配置/脚本
 
-  config             交互式配置（流量GiB、间隔分钟、线程1-32、国内外、分块MB）。
-  set k=v [...]      非交互更新配置。
-  show               显示当前配置。
-  install-systemd    手动安装 systemd 单元（指向当前目录脚本）。
-  remove-systemd     手动移除 systemd 单元。
-  install-gotr       安装系统级快捷命令 /usr/local/bin/gotr（需root）。
-  remove-gotr        移除系统级快捷命令 /usr/local/bin/gotr。
+  config             交互式配置（流量GiB、间隔分钟、线程1-32、国内外、分块MB）
+  set k=v [...]      非交互更新配置
+  show               显示当前配置
+  install-systemd    手动安装 systemd 单元（指向当前目录脚本）
+  remove-systemd     手动移除 systemd 单元
+  install-gotr       安装系统级快捷命令 /usr/local/bin/gotr（需root）
+  remove-gotr        移除系统级快捷命令 /usr/local/bin/gotr
 USAGE
 }
 
