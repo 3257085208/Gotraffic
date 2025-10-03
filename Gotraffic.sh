@@ -70,7 +70,8 @@ cmd_config(){
   read -rp "间隔时间 (分钟): " INTERVAL_MINUTES
   read -rp "线程数量 (1-32): " THREADS
   ((THREADS<1)) && THREADS=1; ((THREADS>32)) && THREADS=32
-  echo "下载源: A) 国外(Cloudflare)  B) 国内(QQ/学习强国)"
+  echo "下载源: A) 国外(Cloudflare)
+                B) 国内(腾讯云/阿里云CDN)"
   read -rp "请选择 (A/B): " AREA; [[ -z "${AREA:-}" ]] && AREA="A"
   read -rp "分块大小(MB，默认50): " CHIN || true
   [[ -n "${CHIN:-}" ]] && CHUNK_MB="$CHIN"
@@ -210,20 +211,20 @@ remove_systemd(){
 print_usage(){
   cat <<'USAGE'
 状态命令说明:
-  run                首次自动创建/更新 systemd，并在后台运行（退出SSH也继续）。
-  run-foreground     前台调试运行（打印详细进度）。
-  start              启动 systemd 定时器/服务（后台）。
-  stop               停止 systemd 定时器/服务。
-  status             查看 systemd 状态（是否在后台运行）。
-  log                跟踪查看脚本日志（Ctrl+C 退出）。
-  version            显示版本号。
-  uninstall          卸载脚本：移除 systemd 单元并删除本目录内日志/状态/配置/脚本。
+  run                首次自动创建/更新 systemd，并保持后台运行
+  run-foreground     前台调试运行（打印详细进度）
+  start              启动 systemd 定时器/服务（后台）
+  stop               停止 systemd 定时器/服务
+  status             查看 systemd 状态（是否在后台运行）
+  log                跟踪查看脚本日志（Ctrl+C 退出）
+  version            显示版本号
+  uninstall          卸载脚本：移除 systemd 单元并删除本目录内日志/状态/配置/脚本
 
-  config             交互式配置（流量GiB、间隔分钟、线程1-32、国内外、分块MB）。
-  set k=v [...]      非交互更新配置（示例见下）。
-  show               显示当前配置。
-  install-systemd    手动安装 systemd 单元（指向当前目录脚本）。
-  remove-systemd     手动移除 systemd 单元。
+  config             交互式配置（流量GiB、间隔分钟、线程1-32、国内外、分块MB）
+  set k=v [...]      非交互更新配置（示例见下）
+  show               显示当前配置
+  install-systemd    手动安装 systemd 单元（指向当前目录脚本）
+  remove-systemd     手动移除 systemd 单元
 USAGE
 }
 
