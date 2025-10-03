@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # GoTraffic 一体化安装/配置脚本
 # 作者: DaFuHao
-# 版本: v1.0.0 BETA
+# 版本: v1.0.1 BETA
 # 日期: 2025-10-03
 
 set -Eeuo pipefail
@@ -19,7 +19,7 @@ banner(){
   echo "========================================"
   echo "   GoTraffic 流量消耗工具"
   echo "   作者: DaFuHao"
-  echo "   版本: v1.0.0 BETA"
+  echo "   版本: v1.0.1 BETA"
   echo "   日期: 2025年10月3日"
   echo "========================================"
 }
@@ -46,8 +46,6 @@ set -Eeuo pipefail
 : "\${URLS_UL:=$URLS_UL}"
 : "\${STATE_FILE:=$STATE_FILE}"
 : "\${LOG_FILE:=$LOG_FILE}"
-: "\${CHUNK_MIN_MB:=128}"
-: "\${CHUNK_MAX_MB:=512}"
 
 log(){ echo "[\$(date '+%F %T')] \$*" | tee -a "\$LOG_FILE"; }
 bytes_gib(){ awk -v b="\$1" 'BEGIN{printf "%.2f GiB", b/1024/1024/1024}'; }
@@ -56,11 +54,9 @@ get_used(){ [ -f "\$STATE_FILE" ] && cat "\$STATE_FILE" || echo 0; }
 write_used(){ echo "\$1" > "\$STATE_FILE"; }
 
 pick_url(){ grep -v '^#' "\$1" | shuf -n1; }
-rand_chunk(){ awk -v min="\$CHUNK_MIN_MB" -v max="\$CHUNK_MAX_MB" 'BEGIN{srand();print int((min+rand()*(max-min+1))*1024*1024)}'; }
-prepare_url(){ local url="\$1" size="\$2"; echo "\${url//\{bytes\}/\$size}"; }
 
 curl_dl(){ curl -L --silent --output /dev/null --write-out '%{size_download}\n' "\$1"; }
-curl_ul(){ head -c "\$2" /dev/zero | curl -X POST --data-binary @- -s -o /dev/null --write-out '%{size_upload}\n' "\$1"; }
+curl_ul(){ head -c 25000000 /dev/zero | curl -X POST --data-binary @- -s -o /dev/null --write-out '%{size_upload}\n' "\$1"; }
 
 main(){
   local limit=\$((LIMIT_GB*1024*1024*1024))
@@ -68,23 +64,33 @@ main(){
   local left=\$((limit-used))
   (( left <= 0 )) && { log "额度已满"; exit 0; }
 
-  local chunk=\$(rand_chunk)
-  (( chunk > left )) && chunk=\$left
+  local chunk=25000000   # 每次固定 25MB
 
-  if [ "\$MODE" = "download" ]; then
-    url=\$(pick_url "\$URLS_DL"); url=\$(prepare_url "\$url" "\$chunk"); got=\$(curl_dl "\$url")
-  elif [ "\$MODE" = "upload" ]; then
-    url=\$(pick_url "\$URLS_UL"); got=\$(curl_ul "\$url" "\$chunk")
-  else
-    url=\$(pick_url "\$URLS_DL"); url=\$(prepare_url "\$url" "\$chunk"); got1=\$(curl_dl "\$url")
-    url=\$(pick_url "\$URLS_UL"); got2=\$(curl_ul "\$url" "\$chunk")
-    got=\$((got1+got2))
+  for ((i=1;i<=THREADS;i++)); do
+    {
+      if [ "\$MODE" = "download" ]; then
+        url=\$(pick_url "\$URLS_DL"); got=\$(curl_dl "\$url")
+      elif [ "\$MODE" = "upload" ]; then
+        url=\$(pick_url "\$URLS_UL"); got=\$(curl_ul "\$url")
+      else
+        url=\$(pick_url "\$URLS_DL"); got1=\$(curl_dl "\$url")
+        url=\$(pick_url "\$URLS_UL"); got2=\$(curl_ul "\$url")
+        got=\$((got1+got2))
+      fi
+      echo "\$got" >> "\$LOG_FILE.tmp"
+    } &
+  done
+  wait
+
+  local got_total=0
+  if [ -f "\$LOG_FILE.tmp" ]; then
+    while read -r line; do got_total=\$((got_total+line)); done < "\$LOG_FILE.tmp"
+    rm -f "\$LOG_FILE.tmp"
   fi
 
-  got=\${got%%.*}
-  used=\$((used+got))
+  used=\$((used+got_total))
   write_used "\$used"
-  log "消耗 \$(bytes_gib "\$got") | 累计 \$(bytes_gib "\$used")/\$(bytes_gib "\$limit")"
+  log "本轮消耗 \$(bytes_gib "\$got_total") | 累计 \$(bytes_gib "\$used")/\$(bytes_gib "\$limit")"
 }
 main "\$@"
 EOF_CORE
@@ -133,8 +139,9 @@ case "\$1" in
   ud) systemctl set-environment MODE=ud; echo "切换到上下行模式";;
   now) systemctl start \$svc;;
   status)
+    echo "--- 流量状态 ---"
     \$core
-    echo "systemd 定时器状态："
+    echo "--- 定时器状态 ---"
     systemctl list-timers | grep gotraffic || true
     ;;
   log) tail -f "\$logfile";;
@@ -199,8 +206,8 @@ main(){
   banner
   ask_config
   write_core
-  [ -e "$URLS_DL" ] || echo "https://speed.cloudflare.com/__down?bytes={bytes}" > "$URLS_DL"
-  [ -e "$URLS_UL" ] || echo "# 上传 URL 填这里" > "$URLS_UL"
+  [ -e "$URLS_DL" ] || echo "https://speed.cloudflare.com/__down?bytes=25000000" > "$URLS_DL"
+  [ -e "$URLS_UL" ] || echo "# 上传 URL 填这里 (建议配置一个可接受 POST 的服务)" > "$URLS_UL"
   write_systemd
   write_gotr
   echo "安装完成 ✅"
