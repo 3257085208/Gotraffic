@@ -39,7 +39,9 @@ mkdir -p "$(dirname "$STATE_FILE")" "$(dirname "$LOG_FILE")"
 touch "$STATE_FILE" "$LOG_FILE"
 
 log(){ echo "[$(date '+%F %T')] $*" | tee -a "$LOG_FILE"; }
-bytes_h(){ awk -v b="$1" 'BEGIN{split("B KB MB GB TB",u);i=1;while(b>=1024&&i<5){b/=1024;i++}printf "%.2f %s",b,u[i] }'; }
+
+# 🚀 强制 GiB 显示
+bytes_gib(){ awk -v b="$1" 'BEGIN{printf "%.2f GiB", b/1024/1024/1024}'; }
 
 read_state(){ [ -s "$STATE_FILE" ] && cat "$STATE_FILE" || echo -e "0\n0"; }
 write_state(){ echo -e "$1\n$2" > "$STATE_FILE"; }
@@ -87,7 +89,7 @@ main(){
 
   got=${got%%.*}
   add_used "$got"
-  log "消耗 $(bytes_h "$got") | 窗口累计 $(bytes_h $((used+got)))/$(bytes_h $limit)"
+  log "消耗 $(bytes_gib "$got") | 窗口累计 $(bytes_gib $((used+got)))/$(bytes_gib $limit)"
 }
 main "$@"
 EOF_CORE
