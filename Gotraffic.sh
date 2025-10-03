@@ -2,13 +2,13 @@
 # ========================================
 #   GoTraffic 流量消耗工具
 #   作者: DaFuHao
-#   版本: v1.0.9
+#   版本: v1.1.0
 #   日期: 2025年10月3日
 # ========================================
 
 set -Eeuo pipefail
 
-VERSION="v1.0.9"
+VERSION="v1.1.0"
 AUTHOR="DaFuHao"
 DATE="2025年10月3日"
 
@@ -48,6 +48,7 @@ set -Eeuo pipefail
 : "${LOG_FILE:=/root/gotraffic.log}"
 : "${URLS_DL:=/etc/gotraffic/urls.dl.txt}"
 : "${URLS_UL:=/etc/gotraffic/urls.ul.txt}"
+: "${DEBUG:=0}"
 
 mkdir -p "$(dirname "$STATE_FILE")" "$(dirname "$LOG_FILE")"
 touch "$LOG_FILE"
@@ -57,6 +58,7 @@ if ! command -v curl >/dev/null 2>&1; then
   echo "[ERROR] curl 未安装，请先安装 curl" | tee -a "$LOG_FILE"
   exit 1
 fi
+[ "$DEBUG" = "1" ] && set -x
 
 log(){ echo "[$(date '+%F %T')] $*" | tee -a "$LOG_FILE"; }
 bytes_h(){ awk -v b="$1" 'BEGIN{split("B KB MB GB TB",u);i=1;while(b>=1024&&i<5){b/=1024;i++}printf "%.2f %s",b,u[i] }'; }
@@ -70,17 +72,28 @@ read_state(){
 write_state(){ printf '%s\n%s\n' "$1" "$2" > "$STATE_FILE"; }
 
 ensure_window(){
-  local now_ts=$(date +%s) start=0 used=0 secs=$((INTERVAL_MINUTES*60))
-  mapfile -t s < <(read_state)
+  local now_ts start used secs
+  now_ts=$(date +%s)
+  secs=$((INTERVAL_MINUTES*60))
+  start=0; used=0
+  mapfile -t s < <(read_state || true)
   [ "${#s[@]}" -ge 1 ] && start="${s[0]}"
   [ "${#s[@]}" -ge 2 ] && used="${s[1]}"
-  if [ -z "$start" ] || [ "$start" -le 0 ] || [ $((now_ts-start)) -ge "$secs" ]; then
+  if [ -z "${start:-}" ] || [ "$start" -le 0 ] || [ $((now_ts-start)) -ge "$secs" ]; then
     start="$now_ts"; used=0
   fi
   write_state "$start" "$used"
 }
 get_used(){ awk 'NR==2{print $1+0}' "$STATE_FILE" 2>/dev/null || echo 0; }
-add_used(){ local add="$1"; mapfile -t s < <(read_state); local start="${s[0]:-$(date +%s)}" used="${s[1]:-0}"; write_state "$start" "$((used+add))"; }
+add_used(){
+  local add start used
+  add="$1"
+  mapfile -t s < <(read_state || true)
+  start="${s[0]:-$(date +%s)}"
+  used="${s[1]:-0}"
+  used=$((used+add))
+  write_state "$start" "$used"
+}
 
 pick_url(){
   # 随机一条；无 shuf 时取第一条
@@ -95,15 +108,26 @@ curl_ul(){ head -c 25000000 /dev/zero | curl -L --silent --fail -X POST --data-b
 
 run_once(){
   ensure_window
-  local limit=$((LIMIT_GB*1024*1024*1024)) used=$(get_used) left=$((limit-used))
-  [ "$left" -le 0 ] && { log "本窗口额度已完成"; return 0; }
 
-  local tmp; tmp="$(mktemp)"
+  local limit used left
+  limit=$((LIMIT_GB*1024*1024*1024))
+  used=$(get_used)
+  left=$((limit-used))
+
+  if [ "$left" -le 0 ]; then
+    log "本窗口额度已完成"
+    return 0
+  fi
+
+  local tmp
+  tmp="$(mktemp)"
   log "开始：额度=$(bytes_h "$limit") 已用=$(bytes_h "$used") 线程=$THREADS 模式=$MODE"
 
+  local i
   for ((i=1;i<=THREADS;i++)); do
     {
-      local got=0 u g1 g2
+      local got u g1 g2
+      got=0
       case "$MODE" in
         download) u="$(pick_url "$URLS_DL")"; got="$(curl_dl "$u" || echo 0)";;
         upload)   u="$(pick_url "$URLS_UL")"; got="$(curl_ul "$u" || echo 0)";;
@@ -114,8 +138,11 @@ run_once(){
   done
   wait
 
-  local got_total=0 line
-  while read -r line; do [ -n "$line" ] && got_total=$((got_total+line)); done < "$tmp"
+  local got_total line
+  got_total=0
+  while read -r line; do
+    [ -n "$line" ] && got_total=$((got_total+line))
+  done < "$tmp"
   rm -f "$tmp"
 
   add_used "$got_total"
@@ -125,9 +152,9 @@ run_once(){
 
 status_cli(){
   # 读取 systemd 的环境，避免显示默认值
-  local svc=gotraffic.service
-  local env; env=$(systemctl show -p Environment "$svc" 2>/dev/null | sed -e 's/^Environment=//' -e 's/ /\n/g' || true)
-  local lg th md
+  local svc env lg th md
+  svc=gotraffic.service
+  env=$(systemctl show -p Environment "$svc" 2>/dev/null | sed -e 's/^Environment=//' -e 's/ /\n/g' || true)
   lg=$(echo "$env" | awk -F= '$1=="LIMIT_GB"{print $2}')
   th=$(echo "$env" | awk -F= '$1=="THREADS"{print $2}')
   md=$(echo "$env" | awk -F= '$1=="MODE"{print $2}')
@@ -135,7 +162,9 @@ status_cli(){
   [ -z "$th" ] && th="$THREADS"
   [ -z "$md" ] && md="$MODE"
   ensure_window
-  local used=$(get_used) limit=$((lg*1024*1024*1024))
+  local used limit
+  used=$(get_used)
+  limit=$((lg*1024*1024*1024))
   echo "--- 流量状态 ---"
   echo "已用: $(bytes_h "$used") / $(bytes_h "$limit")   (线程=$th 模式=$md)"
   echo "--- 定时器状态 ---"
@@ -197,6 +226,8 @@ write_systemd(){
   cat >/etc/systemd/system/gotraffic.service <<EOF
 [Unit]
 Description=GoTraffic core
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=oneshot
