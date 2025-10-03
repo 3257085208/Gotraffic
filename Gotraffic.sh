@@ -2,31 +2,33 @@
 # ========================================
 #   GoTraffic 流量消耗工具
 #   作者: DaFuHao
-#   版本: v1.3.3
+#   版本: v1.3.4
 #   日期: 2025-10-03
 # ========================================
 
 set -Eeuo pipefail
-VERSION="v1.3.3"; AUTHOR="DaFuHao"; DATE="2025-10-03"
+VERSION="v1.3.4"; AUTHOR="DaFuHao"; DATE="2025-10-03"
 
-# 安装阶段默认值（运行期以 systemd Environment 为准；可用 gotr config 修改）
-: "${LIMIT_GB:=10}"                 # 每窗口额度 GiB
-: "${INTERVAL_MINUTES:=30}"         # 窗口时长(分钟)
-: "${THREADS:=2}"                   # 并发 1-32
-: "${MODE:=download}"               # download | upload | ud
+# 安装阶段默认值（运行期以 systemd Environment 为准；可 gotr config 修改）
+: "${LIMIT_GB:=10}"                   # 每窗口额度 GiB
+: "${INTERVAL_MINUTES:=30}"           # 窗口时长(分钟)
+: "${THREADS:=4}"                     # 并发 1-32
+: "${MODE:=download}"                 # download | upload | ud
 : "${STATE_FILE:=/root/gotraffic.state}"
 : "${LOG_FILE:=/root/gotraffic.log}"
 : "${URLS_DL:=/etc/gotraffic/urls.dl.txt}"
 : "${URLS_UL:=/etc/gotraffic/urls.ul.txt}"
 
-# 强化参数（可在 gotr config 里改，也可直接改 service 的 Environment）
-: "${CHUNK_BYTES_DL:=100000000}"    # 单次下载字节（默认 100,000,000 B ≈ 95 MiB）
-: "${CHUNK_BYTES_UL:=25000000}"     # 单次上传字节
-: "${BATCH_SLEEP_MS:=150}"          # 批次间隔毫秒
-: "${ZERO_BACKOFF_MS:=1500}"        # 全 0 批次初始退避
-: "${ZERO_BACKOFF_MAX_MS:=12000}"   # 全 0 批次最大退避
+# 强化参数（gotr config 可改）
+: "${CHUNK_BYTES_DL:=250000000}"      # 单次下载字节（默认 250,000,000 B ≈ 238 MiB）
+: "${CHUNK_BYTES_UL:=25000000}"       # 单次上传字节
+: "${BATCH_SLEEP_MS:=120}"            # 批次间隔毫秒
+: "${ZERO_BACKOFF_MS:=1200}"          # 全 0 批次初始退避
+: "${ZERO_BACKOFF_MAX_MS:=10000}"     # 全 0 批次最大退避
+: "${ZERO_STREAK_SWITCH:=6}"          # 连续几次 0B 后切换偏好非 CF 域
+: "${DEBUG:=0}"
 
-# 你的多源（默认写入 urls.dl.txt；若文件已存在则不覆盖）
+# 默认多源清单（首次安装若文件不存在才写入）
 DEFAULT_DL_URLS=$'# 你也可以继续追加更多源（每行一个）\nhttps://speed.cloudflare.com/__down?bytes=104857600\nhttps://speed.cloudflare.com/__down?bytes=524288000\nhttps://speed.cloudflare.com/__down?bytes=25000000\nhttps://speed.cloudflare.com/__down?bytes=1073741824\nhttps://p1.dailygn.com/obj/g-marketing-act-assets/2024_11_28_14_54_37/mv_1128_1080px.mp4\n'
 DEFAULT_UL_URL="https://speed.cloudflare.com/__down?bytes={bytes}"
 
@@ -40,29 +42,29 @@ banner(){ cat <<EOF
 EOF
 }
 
-# ----------------- 写核心脚本 -----------------
+# ----------------- 核心脚本 -----------------
 write_core(){
   cat >/usr/local/bin/gotraffic-core.sh <<'EOF_CORE'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 : "${LIMIT_GB:=10}"
 : "${INTERVAL_MINUTES:=30}"
-: "${THREADS:=2}"
+: "${THREADS:=4}"
 : "${MODE:=download}"
 : "${STATE_FILE:=/root/gotraffic.state}"
 : "${LOG_FILE:=/root/gotraffic.log}"
 : "${URLS_DL:=/etc/gotraffic/urls.dl.txt}"
 : "${URLS_UL:=/etc/gotraffic/urls.ul.txt}"
-: "${CHUNK_BYTES_DL:=100000000}"
+: "${CHUNK_BYTES_DL:=250000000}"
 : "${CHUNK_BYTES_UL:=25000000}"
-: "${BATCH_SLEEP_MS:=150}"
-: "${ZERO_BACKOFF_MS:=1500}"
-: "${ZERO_BACKOFF_MAX_MS:=12000}"
+: "${BATCH_SLEEP_MS:=120}"
+: "${ZERO_BACKOFF_MS:=1200}"
+: "${ZERO_BACKOFF_MAX_MS:=10000}"
+: "${ZERO_STREAK_SWITCH:=6}"
 : "${DEBUG:=0}"
 
 mkdir -p "$(dirname "$STATE_FILE")" "$(dirname "$LOG_FILE")"
 touch "$LOG_FILE"
-
 command -v curl >/dev/null 2>&1 || { echo "[$(date '+%F %T')] [ERROR] curl 未安装" | tee -a "$LOG_FILE"; exit 1; }
 [ "$DEBUG" = "1" ] && set -x
 
@@ -93,12 +95,22 @@ ensure_window(){
 }
 add_used(){ local add="$1"; mapfile -t s < <(read_state || true); local start="${s[0]:-$(date +%s)}" used="${s[1]:-0}"; write_state "$start" "$((used+add))"; }
 
-# --- URL 处理 ---
-pick_url(){
-  # 从清单中随机选择（无 shuf 时取第一行），忽略空行与注释
-  awk 'NF && $1 !~ /^#/' "$1" | { command -v shuf >/dev/null 2>&1 && shuf -n1 || head -n1; }
+# ---------- URL 选取与下载策略 ----------
+_is_cf_domain(){ echo "$1" | grep -qiE '(^|://)([^/]*\.)?cloudflare\.com(/|$)'; }
+
+# 从清单中选源：优先选择非 CF（当连续 0B 达阈值时）
+pick_url_smart(){
+  local list="$1" prefer_non_cf="$2"
+  if [ "$prefer_non_cf" = "1" ]; then
+    # 有非 CF 行就从非 CF 里取，否则退化到全表
+    awk 'NF && $1 !~ /^#/ && $0 !~ /cloudflare\.com/i' "$list" | { command -v shuf >/dev/null 2>&1 && shuf -n1 || head -n1; } \
+      || awk 'NF && $1 !~ /^#/' "$list" | { command -v shuf >/dev/null 2>&1 && shuf -n1 || head -n1; }
+  else
+    awk 'NF && $1 !~ /^#/' "$list" | { command -v shuf >/dev/null 2>&1 && shuf -n1 || head -n1; }
+  fi
 }
-bust(){ # 追加随机参数避免限频缓存
+
+bust(){ # 追加随机参数避免缓存/限频
   local u="$1" r; r=$RANDOM$RANDOM$RANDOM
   if [[ "$u" == *\{bytes\}* && -n "${2:-}" ]]; then
     u="${u//\{bytes\}/$2}"
@@ -134,24 +146,24 @@ curl_ul(){ head -c "$2" /dev/zero | curl --http1.1 -L --silent --show-error --fa
 sleep_ms(){ awk -v ms="$1" 'BEGIN{printf "%.3f", ms/1000}' | { read s; sleep "$s"; } 2>/dev/null || true; }
 
 run_batch_once(){
-  local tmp; tmp="$(mktemp)"
+  local prefer_non_cf="$1" tmp; tmp="$(mktemp)"
   local i
   for ((i=1;i<=THREADS;i++)); do
     {
       local got=0 u g1 g2
       case "$MODE" in
         download)
-          u="$(pick_url "$URLS_DL")"
+          u="$(pick_url_smart "$URLS_DL" "$prefer_non_cf")"
           got="$(curl_dl_choose "$u" "$CHUNK_BYTES_DL" || echo 0)"
         ;;
         upload)
-          u="$(pick_url "$URLS_UL")"; u="$(bust "$u" "$CHUNK_BYTES_UL")"
+          u="$(pick_url_smart "$URLS_UL" 0)"; u="$(bust "$u" "$CHUNK_BYTES_UL")"
           got="$(curl_ul "$u" "$CHUNK_BYTES_UL" || echo 0)"
         ;;
         ud)
-          u="$(pick_url "$URLS_DL")"
+          u="$(pick_url_smart "$URLS_DL" "$prefer_non_cf")"
           g1="$(curl_dl_choose "$u" "$CHUNK_BYTES_DL" || echo 0)"
-          u="$(pick_url "$URLS_UL")"; u="$(bust "$u" "$CHUNK_BYTES_UL")"
+          u="$(pick_url_smart "$URLS_UL" 0)"; u="$(bust "$u" "$CHUNK_BYTES_UL")"
           g2="$(curl_ul "$u" "$CHUNK_BYTES_UL" || echo 0)"
           got=$((g1+g2))
         ;;
@@ -160,41 +172,46 @@ run_batch_once(){
     } &
   done
   wait || true
-  local sum=0 line
-  while read -r line; do [ -n "$line" ] && sum=$((sum+line)); done < "$tmp"
+  local sum=0 line; while read -r line; do [ -n "$line" ] && sum=$((sum+line)); done < "$tmp"
   rm -f "$tmp"
   echo "$sum"
 }
 
 run_until_cap(){
   ensure_window
-  local limit used left zero_sleep; zero_sleep="$ZERO_BACKOFF_MS"
+  local limit used left zero_sleep zero_streak prefer_non_cf
+  zero_sleep="$ZERO_BACKOFF_MS"; zero_streak=0; prefer_non_cf=0
   limit=$((LIMIT_GB*1024*1024*1024))
-  used=$(get_used)
-  left=$((limit-used))
+  used=$(get_used); left=$((limit-used))
   if [ "$left" -le 0 ]; then log "本窗口额度已完成"; return 0; fi
-
   log "开始循环：窗口额度=$(bytes_h "$limit") 已用=$(bytes_h "$used") 线程=$THREADS 模式=$MODE 窗口剩余$(window_secs_left)s"
+
   while :; do
-    local win_left used_now left_now
+    local win_left used_now left_now got
     win_left=$(window_secs_left)
     used_now=$(get_used)
     left_now=$((limit-used_now))
     if [ "$left_now" -le 0 ]; then log "达到窗口上限，停止。"; break; fi
     if [ "$win_left" -le 0 ]; then log "窗口已结束，停止。"; break; fi
 
-    local got; got="$(run_batch_once)"; got="${got%%.*}"
-    if [ "$got" -le 0 ] ; then
-      log "本批新增 0 B（可能被限速/限频），退避 ${zero_sleep}ms 后再试"
+    got="$(run_batch_once "$prefer_non_cf")"; got="${got%%.*}"
+    if [ "$got" -le 0 ]; then
+      zero_streak=$((zero_streak+1))
+      log "本批新增 0 B（可能被限速/限频） streak=${zero_streak}，退避 ${zero_sleep}ms 后再试"
+      if [ "$zero_streak" -ge "$ZERO_STREAK_SWITCH" ]; then
+        prefer_non_cf=1  # 开始优先非 CF 源
+        log "切换为优先使用非 Cloudflare 源"
+      fi
       sleep_ms "$zero_sleep"
       zero_sleep=$(( zero_sleep*2 )); [ "$zero_sleep" -gt "$ZERO_BACKOFF_MAX_MS" ] && zero_sleep="$ZERO_BACKOFF_MAX_MS"
       continue
     fi
-    zero_sleep="$ZERO_BACKOFF_MS" # 恢复初始退避
+    # 有进展就复位退避与 streak
+    zero_sleep="$ZERO_BACKOFF_MS"; zero_streak=0
 
     add_used "$got"
     used_now=$(get_used)
-    log "本批新增 $(bytes_h "$got") | 累计 $(bytes_h "$used_now") / $(bytes_h "$limit") | 窗口剩余 ${win_left}s"
+    log "本批新增 $(bytes_h "$got") | 累计 $(bytes_h "$used_now") / $(bytes_h "$limit") | 窗口剩余 ${win_left}s | 源偏好: $([ "$prefer_non_cf" = "1" ] && echo non-cf || echo any)"
 
     [ "$BATCH_SLEEP_MS" -gt 0 ] 2>/dev/null && sleep_ms "$BATCH_SLEEP_MS"
   done
@@ -256,6 +273,7 @@ case "${1:-}" in
               edit_service_env CHUNK_BYTES_UL "$CHUNK_BYTES_UL"
               edit_service_env ZERO_BACKOFF_MS "$ZERO_BACKOFF_MS"
               edit_service_env ZERO_BACKOFF_MAX_MS "$ZERO_BACKOFF_MAX_MS"
+              edit_service_env ZERO_STREAK_SWITCH "$ZERO_STREAK_SWITCH"
 
               # 重写 timer：每 new_i 分钟触发
               cat >/etc/systemd/system/gotraffic.timer <<EOT
@@ -285,7 +303,7 @@ EOF_CORE
   chmod +x /usr/local/bin/gotraffic-core.sh
 }
 
-# ----------------- 写 gotr 分发器 -----------------
+# ----------------- gotr 分发器 -----------------
 write_gotr(){
   cat >/usr/local/bin/gotr <<'EOF_GOTR'
 #!/usr/bin/env bash
@@ -294,13 +312,10 @@ EOF_GOTR
   chmod +x /usr/local/bin/gotr
 }
 
-# ----------------- 写 systemd 单元 -----------------
+# ----------------- systemd 单元 -----------------
 write_systemd(){
   mkdir -p /etc/gotraffic
-  # 如果 dl 清单为空，写入你的多源（每行一个）
-  if [ ! -s "$URLS_DL" ]; then
-    printf "%b" "$DEFAULT_DL_URLS" > "$URLS_DL"
-  fi
+  if [ ! -s "$URLS_DL" ]; then printf "%b" "$DEFAULT_DL_URLS" > "$URLS_DL"; fi
   [ -s "$URLS_UL" ] || echo "$DEFAULT_UL_URL" > "$URLS_UL"
 
   cat >/etc/systemd/system/gotraffic.service <<EOF
@@ -326,6 +341,7 @@ Environment="CHUNK_BYTES_UL=$CHUNK_BYTES_UL"
 Environment="BATCH_SLEEP_MS=$BATCH_SLEEP_MS"
 Environment="ZERO_BACKOFF_MS=$ZERO_BACKOFF_MS"
 Environment="ZERO_BACKOFF_MAX_MS=$ZERO_BACKOFF_MAX_MS"
+Environment="ZERO_STREAK_SWITCH=$ZERO_STREAK_SWITCH"
 ExecStart=/usr/local/bin/gotraffic-core.sh run
 EOF
 
@@ -348,13 +364,13 @@ EOF
   systemctl start gotraffic.service || true
 }
 
-# ----------------- 安装主流程 -----------------
+# ----------------- 安装 -----------------
 main_install(){
   banner
   read -rp "每窗口要消耗多少流量 (GiB) [10]: " LIMIT_GB; LIMIT_GB=${LIMIT_GB:-10}
   read -rp "窗口间隔时长 (分钟) [30]: " INTERVAL_MINUTES; INTERVAL_MINUTES=${INTERVAL_MINUTES:-30}
-  read -rp "并发线程数 (1-32) [2]: " THREADS; THREADS=${THREADS:-2}
-  [[ "$THREADS" =~ ^[0-9]+$ ]] && (( THREADS>=1 && THREADS<=32 )) || THREADS=2
+  read -rp "并发线程数 (1-32) [4]: " THREADS; THREADS=${THREADS:-4}
+  [[ "$THREADS" =~ ^[0-9]+$ ]] && (( THREADS>=1 && THREADS<=32 )) || THREADS=4
 
   write_core
   write_gotr
@@ -365,7 +381,7 @@ main_install(){
   echo "快捷命令: gotr d|u|ud|now|new|abort|status|log|stop|resume|config|update|uninstall"
 }
 
-# 默认多源与默认上行端点（供 systemd 写入时引用）
+# 默认多源（供首次安装写入）
 DEFAULT_DL_URLS=$'# 你也可以继续追加更多源（每行一个）\nhttps://speed.cloudflare.com/__down?bytes=104857600\nhttps://speed.cloudflare.com/__down?bytes=524288000\nhttps://speed.cloudflare.com/__down?bytes=25000000\nhttps://speed.cloudflare.com/__down?bytes=1073741824\nhttps://p1.dailygn.com/obj/g-marketing-act-assets/2024_11_28_14_54_37/mv_1128_1080px.mp4\n'
 DEFAULT_UL_URL="https://speed.cloudflare.com/__down?bytes={bytes}"
 
