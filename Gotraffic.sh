@@ -2,12 +2,12 @@
 # ========================================
 #   GoTraffic 流量消耗工具
 #   作者: DaFuHao
-#   版本: v1.3.2
+#   版本: v1.3.3
 #   日期: 2025-10-03
 # ========================================
 
 set -Eeuo pipefail
-VERSION="v1.3.2"; AUTHOR="DaFuHao"; DATE="2025-10-03"
+VERSION="v1.3.3"; AUTHOR="DaFuHao"; DATE="2025-10-03"
 
 # 安装阶段默认值（运行期以 systemd Environment 为准；可用 gotr config 修改）
 : "${LIMIT_GB:=10}"                 # 每窗口额度 GiB
@@ -26,6 +26,7 @@ VERSION="v1.3.2"; AUTHOR="DaFuHao"; DATE="2025-10-03"
 : "${ZERO_BACKOFF_MS:=1500}"        # 全 0 批次初始退避
 : "${ZERO_BACKOFF_MAX_MS:=12000}"   # 全 0 批次最大退避
 
+# 你的多源（默认写入 urls.dl.txt；若文件已存在则不覆盖）
 DEFAULT_DL_URLS=$'# 你也可以继续追加更多源（每行一个）\nhttps://speed.cloudflare.com/__down?bytes=104857600\nhttps://speed.cloudflare.com/__down?bytes=524288000\nhttps://speed.cloudflare.com/__down?bytes=25000000\nhttps://speed.cloudflare.com/__down?bytes=1073741824\nhttps://p1.dailygn.com/obj/g-marketing-act-assets/2024_11_28_14_54_37/mv_1128_1080px.mp4\n'
 DEFAULT_UL_URL="https://speed.cloudflare.com/__down?bytes={bytes}"
 
@@ -93,7 +94,10 @@ ensure_window(){
 add_used(){ local add="$1"; mapfile -t s < <(read_state || true); local start="${s[0]:-$(date +%s)}" used="${s[1]:-0}"; write_state "$start" "$((used+add))"; }
 
 # --- URL 处理 ---
-pick_url(){ awk 'NF && $1 !~ /^#/' "$1" | { command -v shuf >/div/null 2>&1 && shuf -n1 || head -n1; }; } 2>/dev/null || head -n1 "$1"
+pick_url(){
+  # 从清单中随机选择（无 shuf 时取第一行），忽略空行与注释
+  awk 'NF && $1 !~ /^#/' "$1" | { command -v shuf >/dev/null 2>&1 && shuf -n1 || head -n1; }
+}
 bust(){ # 追加随机参数避免限频缓存
   local u="$1" r; r=$RANDOM$RANDOM$RANDOM
   if [[ "$u" == *\{bytes\}* && -n "${2:-}" ]]; then
@@ -360,5 +364,9 @@ main_install(){
   echo "日志文件: $LOG_FILE"
   echo "快捷命令: gotr d|u|ud|now|new|abort|status|log|stop|resume|config|update|uninstall"
 }
+
+# 默认多源与默认上行端点（供 systemd 写入时引用）
+DEFAULT_DL_URLS=$'# 你也可以继续追加更多源（每行一个）\nhttps://speed.cloudflare.com/__down?bytes=104857600\nhttps://speed.cloudflare.com/__down?bytes=524288000\nhttps://speed.cloudflare.com/__down?bytes=25000000\nhttps://speed.cloudflare.com/__down?bytes=1073741824\nhttps://p1.dailygn.com/obj/g-marketing-act-assets/2024_11_28_14_54_37/mv_1128_1080px.mp4\n'
+DEFAULT_UL_URL="https://speed.cloudflare.com/__down?bytes={bytes}"
 
 main_install
