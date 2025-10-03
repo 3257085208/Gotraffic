@@ -2,13 +2,13 @@
 # ========================================
 #   GoTraffic 流量消耗工具
 #   作者: DaFuHao
-#   版本: v1.2.0
+#   版本: v1.2.1
 #   日期: 2025年10月3日
 # ========================================
 
 set -Eeuo pipefail
 
-VERSION="v1.2.0"
+VERSION="v1.2.1"
 AUTHOR="DaFuHao"
 DATE="2025年10月3日"
 
@@ -47,7 +47,7 @@ set -Eeuo pipefail
 : "${LOG_FILE:=/root/gotraffic.log}"
 : "${URLS_DL:=/etc/gotraffic/urls.dl.txt}"
 : "${URLS_UL:=/etc/gotraffic/urls.ul.txt}"
-: "${BATCH_SLEEP_MS:=200}"  # 每一批之间的休眠，毫秒，保证“秒级”持续运行同时不爆CPU
+: "${BATCH_SLEEP_MS:=200}"  # 每批之间休眠(毫秒)，保证“秒级”持续运行同时不爆CPU
 : "${DEBUG:=0}"
 
 mkdir -p "$(dirname "$STATE_FILE")" "$(dirname "$LOG_FILE")"
@@ -55,7 +55,7 @@ touch "$LOG_FILE"
 
 # 依赖检查
 if ! command -v curl >/dev/null 2>&1; then
-  echo "[ERROR] curl 未安装，请先安装 curl" | tee -a "$LOG_FILE"
+  echo "[$(date '+%F %T')] [ERROR] curl 未安装" | tee -a "$LOG_FILE"
   exit 1
 fi
 [ "$DEBUG" = "1" ] && set -x
@@ -63,16 +63,16 @@ fi
 log(){ echo "[$(date '+%F %T')] $*" | tee -a "$LOG_FILE"; }
 bytes_h(){ awk -v b="$1" 'BEGIN{split("B KB MB GB TB",u);i=1;while(b>=1024&&i<5){b/=1024;i++}printf "%.2f %s",b,u[i] }'; }
 
-# -------- 窗口状态 (state: 第一行=窗口起始时间戳, 第二行=本窗已用字节) --------
+# -------- 窗口状态 (state: 第1行=窗口起始时间戳, 第2行=本窗已用字节) --------
 read_state(){ [ -f "$STATE_FILE" ] && awk 'NR==1{print $1+0} NR==2{print $1+0}' "$STATE_FILE"; }
 write_state(){ printf '%s\n%s\n' "$1" "$2" > "$STATE_FILE"; }
 
 window_secs_left(){
-  local start now secs
+  local start now secs left
   secs=$((INTERVAL_MINUTES*60))
   start=$(awk 'NR==1{print $1+0}' "$STATE_FILE" 2>/dev/null || echo 0)
   now=$(date +%s)
-  local left=$((secs-(now-start)))
+  left=$((secs-(now-start)))
   [ "$left" -lt 0 ] && left=0
   echo "$left"
 }
@@ -97,8 +97,17 @@ pick_url(){ awk 'NF && $1 !~ /^#/' "$1" | { command -v shuf >/dev/null 2>&1 && s
 curl_dl(){ curl -L --silent --fail --output /dev/null --write-out '%{size_download}\n' "$1"; }
 curl_ul(){ head -c 25000000 /dev/zero | curl -L --silent --fail -X POST --data-binary @- --output /dev/null --write-out '%{size_upload}\n' "$1"; }
 
+# -------- 毫秒休眠（支持无 python 的环境） --------
+sleep_ms(){
+  # 优先用 coreutils 的浮点 sleep
+  local ms="$1"
+  if command -v sleep >/dev/null 2>&1; then
+    awk -v ms="$ms" 'BEGIN{printf "%.3f", ms/1000}' | { read s; sleep "$s"; } 2>/dev/null || true
+  fi
+}
+
 run_batch_once(){
-  # 跑一批（THREADS 个并发），返回本批实际字节
+  # 跑一批（THREADS 并发），返回本批实际字节
   local tmp; tmp="$(mktemp)"
   local i
   for ((i=1;i<=THREADS;i++)); do
@@ -129,26 +138,20 @@ run_until_cap(){
 
   log "开始循环：窗口额度=$(bytes_h "$limit") 已用=$(bytes_h "$used") 线程=$THREADS 模式=$MODE 窗口剩余$(window_secs_left)s"
   while :; do
-    # 窗口或额度检查
-    local win_left=$(window_secs_left)
-    used=$(get_used)
-    left=$((limit-used))
-    if [ "$left" -le 0 ]; then log "达到窗口上限，停止。"; break; fi
+    local win_left used_now left_now
+    win_left=$(window_secs_left)
+    used_now=$(get_used)
+    left_now=$((limit-used_now))
+    if [ "$left_now" -le 0 ]; then log "达到窗口上限，停止。"; break; fi
     if [ "$win_left" -le 0 ]; then log "窗口已结束，停止。"; break; fi
 
-    # 执行一批
     local got; got="$(run_batch_once)"
     got="${got%%.*}"
     add_used "$got"
-    used=$(get_used)
-    log "本批新增 $(bytes_h "$got") | 累计 $(bytes_h "$used") / $(bytes_h "$limit") | 窗口剩余 ${win_left}s"
+    used_now=$(get_used)
+    log "本批新增 $(bytes_h "$got") | 累计 $(bytes_h "$used_now") / $(bytes_h "$limit") | 窗口剩余 ${win_left}s"
 
-    # 秒级持续：很短暂睡眠（毫秒）
-    if [ "$BATCH_SLEEP_MS" -gt 0 ] 2>/dev/null; then
-      python3 - <<PY 2>/dev/null || sleep 0
-import time; time.sleep(${BATCH_SLEEP_MS}/1000)
-PY
-    fi
+    [ "$BATCH_SLEEP_MS" -gt 0 ] 2>/dev/null && sleep_ms "$BATCH_SLEEP_MS"
   done
   log "本轮结束。"
 }
@@ -184,9 +187,9 @@ case "${1:-}" in
   config)
               old_l=$(systemctl cat gotraffic.service | awk -F= '/Environment="LIMIT_GB=/{print $3}' | tr -d '"')
               old_t=$(systemctl cat gotraffic.service | awk -F= '/Environment="THREADS=/{print $3}' | tr -d '"')
-              # 读 OnCalendar=*:0/IV → 取 IV
-              old_i=$(systemctl cat gotraffic.timer | awk -F= '/^OnCalendar=/{print $2}' | awk -F'/' 'NF>1{print $2; exit}')
-              [ -z "$old_i" ] && old_i=$(systemctl cat gotraffic.timer | awk -F= '/OnUnitActiveSec=/{print $2}' | sed 's/min//;s/m//')
+              # 读 OnCalendar=*-*-* *:*/IV:00 → 取 IV
+              old_i=$(systemctl cat gotraffic.timer | awk -F= '/^OnCalendar=/{print $2}' | awk -F'*/' 'NF>1{print $2}' | sed 's/:00.*//;s/[^0-9]//g')
+              [ -z "$old_i" ] && old_i=$(systemctl cat gotraffic.timer | awk -F= '/OnUnitActiveSec=/{print $2}' | sed 's/[^0-9]//g')
               read -rp "新额度 GiB (当前=$old_l): " new_l; new_l=${new_l:-$old_l}
               read -rp "新线程 1-32 (当前=$old_t): " new_t; new_t=${new_t:-$old_t}
               read -rp "新间隔 分钟 (当前=$old_i): " new_i; new_i=${new_i:-$old_i}
@@ -197,7 +200,7 @@ case "${1:-}" in
 [Unit]
 Description=Run GoTraffic every ${new_i} minutes
 [Timer]
-OnCalendar=*:0/${new_i}
+OnCalendar=*-*-* *:*/${new_i}:00
 Unit=gotraffic.service
 Persistent=true
 AccuracySec=1s
@@ -242,7 +245,8 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=oneshot
+Type=simple
+TimeoutStartSec=0
 Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/bin"
 Environment="LIMIT_GB=$LIMIT_GB"
 Environment="INTERVAL_MINUTES=$INTERVAL_MINUTES"
@@ -255,13 +259,13 @@ Environment="URLS_UL=$URLS_UL"
 ExecStart=/usr/local/bin/gotraffic-core.sh run
 EOF
 
-  # 使用 OnCalendar，真·每 INTERVAL_MINUTES 分钟触发一次
+  # 使用 OnCalendar：每 INTERVAL_MINUTES 分钟的第 0 秒触发
   cat >/etc/systemd/system/gotraffic.timer <<EOF
 [Unit]
 Description=Run GoTraffic every ${INTERVAL_MINUTES} minutes
 
 [Timer]
-OnCalendar=*:0/${INTERVAL_MINUTES}
+OnCalendar=*-*-* *:*/${INTERVAL_MINUTES}:00
 Unit=gotraffic.service
 Persistent=true
 AccuracySec=1s
@@ -272,7 +276,7 @@ EOF
 
   systemctl daemon-reload
   systemctl enable --now gotraffic.timer
-  # 安装后立即跑一轮（马上开始秒级循环）
+  # 安装后立即跑一轮（马上开始秒级循环，直到达额或窗口结束）
   systemctl start gotraffic.service || true
 }
 
