@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # GoTraffic 一体化安装/配置脚本
 # 作者: DaFuHao
-# 版本: v1.0.1 BETA
+# 版本: v1.0.2 BETA
 # 日期: 2025-10-03
 
 set -Eeuo pipefail
@@ -19,7 +19,7 @@ banner(){
   echo "========================================"
   echo "   GoTraffic 流量消耗工具"
   echo "   作者: DaFuHao"
-  echo "   版本: v1.0.1 BETA"
+  echo "   版本: v1.0.2 BETA"
   echo "   日期: 2025年10月3日"
   echo "========================================"
 }
@@ -64,7 +64,8 @@ main(){
   local left=\$((limit-used))
   (( left <= 0 )) && { log "额度已满"; exit 0; }
 
-  local chunk=25000000   # 每次固定 25MB
+  local chunk=25000000   # 固定 25MB
+  local got_total=0
 
   for ((i=1;i<=THREADS;i++)); do
     {
@@ -77,15 +78,14 @@ main(){
         url=\$(pick_url "\$URLS_UL"); got2=\$(curl_ul "\$url")
         got=\$((got1+got2))
       fi
-      echo "\$got" >> "\$LOG_FILE.tmp"
+      echo "\$got" >> "\$STATE_FILE.tmp"
     } &
   done
   wait
 
-  local got_total=0
-  if [ -f "\$LOG_FILE.tmp" ]; then
-    while read -r line; do got_total=\$((got_total+line)); done < "\$LOG_FILE.tmp"
-    rm -f "\$LOG_FILE.tmp"
+  if [ -f "\$STATE_FILE.tmp" ]; then
+    while read -r line; do got_total=\$((got_total+line)); done < "\$STATE_FILE.tmp"
+    rm -f "\$STATE_FILE.tmp"
   fi
 
   used=\$((used+got_total))
@@ -140,7 +140,9 @@ case "\$1" in
   now) systemctl start \$svc;;
   status)
     echo "--- 流量状态 ---"
-    \$core
+    used=\$(cat "$STATE_FILE" 2>/dev/null || echo 0)
+    limit=\$((\$(systemctl cat \$svc | grep 'Environment=LIMIT_GB' | cut -d= -f2)*1024*1024*1024))
+    echo "已用: \$((used/1024/1024/1024)) GiB / \$((limit/1024/1024/1024)) GiB"
     echo "--- 定时器状态 ---"
     systemctl list-timers | grep gotraffic || true
     ;;
